@@ -1782,6 +1782,7 @@ table.data-table tbody tr:hover {
           <div class="filter-tab" data-filter="LOCKED" onclick="setResultFilter('LOCKED')"><i class="fa-solid fa-lock" style="color:#C2410C"></i> Bị khóa <span class="filter-count" id="count_LOCKED"></span></div>
           <div class="filter-tab" data-filter="FAIL" onclick="setResultFilter('FAIL')"><i class="fa-solid fa-circle-xmark" style="color:#DC2626"></i> Không thể log <span class="filter-count" id="count_FAIL"></span></div>
           <div class="filter-tab" data-filter="PENDING" onclick="setResultFilter('PENDING')"><i class="fa-solid fa-hourglass-half" style="color:#64748B"></i> Chưa thể check <span class="filter-count" id="count_PENDING"></span></div>
+          <div class="filter-tab" data-filter="INVALID" onclick="setResultFilter('INVALID')"><i class="fa-solid fa-user-slash" style="color:#B91C1C"></i> USER không hợp lệ <span class="filter-count" id="count_INVALID"></span></div>
         </div>
         <div class="results-search-wrap">
           <i class="fa-solid fa-magnifying-glass"></i>
@@ -1977,6 +1978,7 @@ table.data-table tbody tr:hover {
       <div>
         <h2 id="submitModalTitle"><i class="fa-solid fa-clipboard-list" style="color:var(--secondary)"></i> Thêm Tài Khoản Kiểm Tra</h2>
         <p>Định dạng linh động: <code>user|pass</code>, <code>user:pass</code>, <code>user:pass|mail</code>… Dấu <code>:</code> và <code>|</code> đều được tự nhận diện.</p>
+        <p><strong>Quy tắc USER:</strong> 6–18 ký tự; chỉ gồm <code>a-z</code>, <code>A-Z</code>, <code>0-9</code>, <code>_</code>, <code>-</code>, <code>.</code>; phải bắt đầu/kết thúc bằng chữ hoặc số và có ít nhất một chữ cái.</p>
       </div>
       <button class="icon-btn" title="Đóng" onclick="closeModal('submitModal')"><i class="fa-solid fa-xmark"></i></button>
     </div>
@@ -2361,23 +2363,36 @@ function clearAccountsInput() {
   toast('🧹 Đã xóa danh sách tài khoản');
 }
 
-function updateAccountCounter() {
-  const text = (document.getElementById('accInput')?.value || '').trim();
+function analyzeUsernameInput(text) {
+  const usernamePattern = /^(?=.{6,18}$)(?=.*[A-Za-z])[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
   const lines = text ? text.split(/\r?\n/).filter(line => {
     const value = line.trim();
     return value.length > 0 && !value.startsWith('#');
   }) : [];
+  let valid = 0;
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    const separator = line.search(/[|:]/);
+    const username = separator > 0 ? line.slice(0, separator).trim() : '';
+    if (usernamePattern.test(username)) valid++;
+  }
+  return { total: lines.length, valid, invalid: lines.length - valid };
+}
+
+function updateAccountCounter() {
+  const text = (document.getElementById('accInput')?.value || '').trim();
+  const analysis = analyzeUsernameInput(text);
   const el = document.getElementById('accCounter');
   if (el) {
     const selectedMode = selectedBillingMode();
     const activeLimit = selectedMode === 'vvip' ? maxVvipAccountsPerJob : (!isAdminKey ? maxAccountsPerJob : null);
-    const overLimit = Number.isInteger(activeLimit) && lines.length > activeLimit;
-    el.textContent = formatNumber(lines.length) + (
+    const overLimit = Number.isInteger(activeLimit) && analysis.valid > activeLimit;
+    el.textContent = formatNumber(analysis.valid) + ' hợp lệ' + (analysis.invalid ? ' · ' + formatNumber(analysis.invalid) + ' USER không hợp lệ' : '') + (
       Number.isInteger(activeLimit)
-        ? ' / ' + formatNumber(activeLimit) + (selectedMode === 'vvip' ? ' tài khoản VVIP' : ' tài khoản')
-        : ' tài khoản'
+        ? ' / tối đa ' + formatNumber(activeLimit) + (selectedMode === 'vvip' ? ' VVIP' : '')
+        : ''
     );
-    el.style.color = overLimit ? 'var(--danger)' : '';
+    el.style.color = overLimit || analysis.invalid ? 'var(--danger)' : '';
   }
   scheduleQuote();
 }
@@ -2566,10 +2581,12 @@ async function refreshQuote() {
   if (!target || (!currentSession && !TOKEN)) return;
   const mode = selectedBillingMode();
   const text = (document.getElementById('accInput')?.value || '').trim();
-  const submittedCount = text ? text.split(/\r?\n/).filter(line => line.trim() && !line.trim().startsWith('#')).length : 0;
+  const submittedCount = analyzeUsernameInput(text).valid;
   const blockCount = Math.max(1, Math.min(48, Number(document.getElementById('blockCount')?.value || 1)));
   if (mode === 'quantity' && submittedCount < 1) {
     target.textContent = 'Nhập danh sách để xem chi phí dự kiến.';
+    target.dataset.affordable = '1';
+    target.dataset.hasEntitlement = '0';
     return;
   }
   target.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang tính chi phí...';
@@ -2613,21 +2630,7 @@ async function sendJob() {
     toast('⚠️ Vui lòng nhập danh sách tài khoản!');
     return;
   }
-  const accountCount = text.split(/\r?\n/).filter(line => {
-    const value = line.trim();
-    return value.length > 0 && !value.startsWith('#');
-  }).length;
   const billingMode = selectedBillingMode();
-  const activeAccountMinimum = billingMode === 'vvip' ? minVvipAccountsPerJob : minAccountsPerJob;
-  if (Number.isInteger(activeAccountMinimum) && accountCount < activeAccountMinimum) {
-    toast('❌ Mỗi job ' + (billingMode === 'vvip' ? 'VVIP ' : '') + 'cần tối thiểu ' + formatNumber(activeAccountMinimum) + ' tài khoản');
-    return;
-  }
-  const activeAccountLimit = billingMode === 'vvip' ? maxVvipAccountsPerJob : (!isAdminKey ? maxAccountsPerJob : null);
-  if (Number.isInteger(activeAccountLimit) && accountCount > activeAccountLimit) {
-    toast('❌ Mỗi job ' + (billingMode === 'vvip' ? 'VVIP ' : '') + 'chỉ được gửi tối đa ' + formatNumber(activeAccountLimit) + ' tài khoản');
-    return;
-  }
   const btn = document.getElementById('btnSend');
   const blockCount = Math.max(1, Math.min(48, Number(document.getElementById('blockCount')?.value || 1)));
   const quote = document.getElementById('billingQuote');
@@ -2652,17 +2655,36 @@ async function sendJob() {
   btn.disabled = true;
   btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin-fast"></i> Đang gửi...';
   try {
-    const d = await api('/api/jobs', {
-      method: 'POST',
-      body: JSON.stringify({
-        text,
-        billing_mode: billingMode,
-        block_count: blockCount,
-        confirm_quantity_while_timed: confirmQuantityWhileTimed,
-      })
-    });
+    const submit = confirmInvalidUsernames => api('/api/jobs', {
+        method: 'POST',
+        body: JSON.stringify({
+          text,
+          billing_mode: billingMode,
+          block_count: blockCount,
+          confirm_quantity_while_timed: confirmQuantityWhileTimed,
+          confirm_invalid_usernames: confirmInvalidUsernames,
+        })
+      });
+    let d = await submit(false);
+    if (!d.ok && d.code === 'INVALID_USERNAMES_REQUIRE_CONFIRMATION') {
+      const examples = (d.invalid_usernames || []).slice(0, 12).map(item =>
+        '• Dòng ' + item.line_number + ': ' + item.username + ' — ' + item.reason
+      ).join('\n');
+      const more = d.invalid_usernames_truncated || Number(d.invalid_accounts || 0) > 12
+        ? '\n• ...và các USER không hợp lệ khác'
+        : '';
+      const accepted = confirm(
+        'Phát hiện ' + formatNumber(d.invalid_accounts || 0) + ' USER không hợp lệ.\n\n' +
+        examples + more + '\n\nNếu tiếp tục, các tài khoản này sẽ không được chạy và được lưu vào nhóm “USER không hợp lệ”. Bạn vẫn muốn tạo job?'
+      );
+      if (!accepted) return;
+      d = await submit(true);
+    }
     if (d.ok) {
-      toast('🚀 Đã tạo Job #' + d.job_id + ' (' + formatNumber(d.total) + ' acc) thành công!');
+      const invalidNote = Number(d.invalid_accounts || 0) > 0
+        ? ' · đã loại ' + formatNumber(d.invalid_accounts) + ' USER không hợp lệ'
+        : '';
+      toast('🚀 Đã tạo Job #' + d.job_id + ' (' + formatNumber(d.total) + ' acc)' + invalidNote + '!');
       await loadSession(false);
       document.getElementById('accInput').value = '';
       updateAccountCounter();
@@ -2993,6 +3015,8 @@ function getRowCategory(row, minLevel = 12) {
   const lvStr = String(row.level || '').trim();
   const lvNum = /^\d+$/.test(lvStr) ? Number(lvStr) : NaN;
 
+  if (rt === 'invalid username') return 'INVALID';
+
   if (st === 'CHƯA THỂ CHECK' || rt === 'chưa thể check') {
     return 'PENDING';
   }
@@ -3019,7 +3043,8 @@ function updateFilterTabCounts(categoryCounts, totalAll) {
     CTNV: Number(categoryCounts?.CTNV || 0),
     LOCKED: Number(categoryCounts?.LOCKED || 0),
     FAIL: Number(categoryCounts?.FAIL || 0),
-    PENDING: Number(categoryCounts?.PENDING || 0)
+    PENDING: Number(categoryCounts?.PENDING || 0),
+    INVALID: Number(categoryCounts?.INVALID || 0)
   };
   for (const k of Object.keys(counts)) {
     const el = document.getElementById('count_' + k);
@@ -3095,6 +3120,10 @@ function renderFilteredRows() {
       tagClass = 'tag-badge pending';
       tagIcon = '<i class="fa-solid fa-hourglass"></i>';
       tagText = 'Chưa thể check';
+    } else if (cat === 'INVALID') {
+      tagClass = 'tag-badge fail';
+      tagIcon = '<i class="fa-solid fa-user-slash"></i>';
+      tagText = 'USER không hợp lệ';
     } else {
       tagClass = 'tag-badge fail';
       tagIcon = '<i class="fa-solid fa-circle-xmark"></i>';
@@ -3213,6 +3242,7 @@ async function refreshDetail(forceRows = true) {
       '<div class="stat-box ok"><div class="num">' + formatNumber(r.ok || 0) + '</div><div class="lbl">OK (Đúng)</div></div>' +
       '<div class="stat-box fail"><div class="num">' + formatNumber(r.fail || 0) + '</div><div class="lbl">Không thể log</div></div>' +
       '<div class="stat-box pending"><div class="num">' + formatNumber(r.uncheckable || 0) + '</div><div class="lbl">Chưa thể check</div></div>' +
+      '<div class="stat-box fail"><div class="num">' + formatNumber(r.invalid || 0) + '</div><div class="lbl">USER không hợp lệ</div></div>' +
       '<div class="stat-box"><div class="num">' + formatNumber(c.pending) + ' / ' + formatNumber(c.claimed) + '</div><div class="lbl">Chunks chờ / chạy</div></div>';
 
     if (shouldLoadRows) {

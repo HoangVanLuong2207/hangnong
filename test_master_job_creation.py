@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import io
 import sqlite3
 import tempfile
 import threading
@@ -98,6 +99,110 @@ class ParseAccountsValidationTest(unittest.TestCase):
             str(raised.exception),
         )
 
+    def test_username_rules_partition_valid_and_invalid_accounts(self) -> None:
+        accounts = master_server.parse_accounts(
+            "Valid_1|pass\na-b.c9|pass\n_badusr|pass\n123456|pass\nabc12|pass\nabc@123|pass"
+        )
+
+        valid, invalid = master_server.partition_accounts_by_username(accounts)
+
+        self.assertEqual([item.account for item in valid], ["Valid_1", "a-b.c9"])
+        self.assertEqual(
+            [item.username for item in invalid],
+            ["_badusr", "123456", "abc12", "abc@123"],
+        )
+        self.assertEqual([item.line_number for item in invalid], [3, 4, 5, 6])
+
+
+class InvalidUsernameJobFlowTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.store = LocalStore(Path(self.temp_dir.name) / "invalid-user-test.db")
+        self.server = CoordinatorServer(("127.0.0.1", 0), MasterHandler, self.store, "secret")
+        self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.server_thread.start()
+        self.base_url = f"http://127.0.0.1:{self.server.server_port}"
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.server_thread.join(5)
+        self.store._conn.close()
+        self.temp_dir.cleanup()
+
+    def post_error(self, body: dict) -> tuple[int, dict]:
+        request = urllib.request.Request(
+            self.base_url + "/api/jobs",
+            data=json.dumps(body).encode("utf-8"),
+            method="POST",
+            headers={"Authorization": "Bearer secret", "Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return response.status, json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            try:
+                return exc.code, json.loads(exc.read().decode("utf-8"))
+            finally:
+                exc.close()
+
+    def get_json(self, path: str) -> dict:
+        request = urllib.request.Request(
+            self.base_url + path,
+            headers={"Authorization": "Bearer secret"},
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def test_warns_then_filters_stores_groups_and_exports_invalid_user(self) -> None:
+        body = {
+            "text": "Valid_1|pass\n_badusr|secret",
+            "billing_mode": "quantity",
+        }
+        status, warning = self.post_error(body)
+
+        self.assertEqual(status, 409)
+        self.assertEqual(warning["code"], "INVALID_USERNAMES_REQUIRE_CONFIRMATION")
+        self.assertEqual(warning["valid_accounts"], 1)
+        self.assertEqual(warning["invalid_accounts"], 1)
+        self.assertEqual(self.store.fetchone("SELECT COUNT(*) FROM jobs")[0], 0)
+
+        body["confirm_invalid_usernames"] = True
+        status, created = self.post_error(body)
+        self.assertEqual(status, 200)
+        self.assertTrue(created["ok"])
+        self.assertEqual(created["total"], 1)
+        self.assertEqual(created["invalid_accounts"], 1)
+        job_id = created["job_id"]
+
+        saved = self.store.fetchone(
+            "SELECT line_number,username,raw_line,reason FROM invalid_usernames WHERE job_id=?",
+            (job_id,),
+        )
+        self.assertEqual(saved[:3], (2, "_badusr", "_badusr|secret"))
+        self.assertIn("bắt đầu", saved[3])
+
+        invalid_group = self.get_json(f"/api/jobs/{job_id}/rows?filter=INVALID")
+        self.assertEqual(invalid_group["category_counts"]["INVALID"], 1)
+        self.assertEqual(invalid_group["rows"][0]["account"], "_badusr")
+
+        request = urllib.request.Request(
+            self.base_url + f"/api/jobs/{job_id}/export.xlsx?min_level=12",
+            headers={"Authorization": "Bearer secret"},
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            workbook_bytes = response.read()
+        import openpyxl
+
+        workbook = openpyxl.load_workbook(io.BytesIO(workbook_bytes), read_only=True)
+        try:
+            self.assertIn("USER không hợp lệ", workbook.sheetnames)
+            row = list(workbook["USER không hợp lệ"].iter_rows(min_row=2, values_only=True))[0]
+            self.assertEqual(row[0], "2")
+            self.assertEqual(row[1], "_badusr|secret")
+        finally:
+            workbook.close()
+
 
 class PostgreSQLMigrationOrderTest(unittest.TestCase):
     def test_legacy_columns_are_migrated_before_schema_indexes(self) -> None:
@@ -194,7 +299,7 @@ class JobCreationRaceTest(unittest.TestCase):
 
         def create_job() -> None:
             try:
-                text = "\n".join(f"user{index}|pass{index}" for index in range(31))
+                text = "\n".join(f"user{index:02d}|pass{index}" for index in range(31))
                 created["response"] = self.post("/api/jobs", {"text": text, "billing_mode": "quantity"})
             except Exception as exc:  # pragma: no cover - surfaced by assertion below
                 created["error"] = exc
@@ -692,7 +797,7 @@ class JobCreationRaceTest(unittest.TestCase):
             "INSERT INTO app_settings (setting_key, setting_value) VALUES (?,?)",
             ("max_accounts_per_job", "1"),
         )
-        text = "user1|pass1\nuser2|pass2"
+        text = "user01|pass1\nuser02|pass2"
 
         status, rejected = self.post_error("/api/jobs", {"text": text}, token="regular-key")
         self.assertEqual(status, 413)
@@ -708,15 +813,15 @@ class JobCreationRaceTest(unittest.TestCase):
     def test_each_regular_key_can_only_have_one_running_job(self) -> None:
         self.store.block_once = False
 
-        status, first = self.post("/api/jobs", {"text": "user1|pass1"}, token="key-a")
+        status, first = self.post("/api/jobs", {"text": "user01|pass1"}, token="key-a")
         self.assertEqual(status, 200)
 
-        status, rejected = self.post_error("/api/jobs", {"text": "user2|pass2"}, token="key-a")
+        status, rejected = self.post_error("/api/jobs", {"text": "user02|pass2"}, token="key-a")
         self.assertEqual(status, 409)
         self.assertEqual(rejected["code"], "KEY_RUNNING_JOB_LIMIT_REACHED")
         self.assertEqual(rejected["active_job_id"], first["job_id"])
 
-        status, other_key_job = self.post("/api/jobs", {"text": "user3|pass3"}, token="key-b")
+        status, other_key_job = self.post("/api/jobs", {"text": "user03|pass3"}, token="key-b")
         self.assertEqual(status, 200)
         self.assertNotEqual(other_key_job["job_id"], first["job_id"])
 
@@ -819,10 +924,10 @@ class JobCreationRaceTest(unittest.TestCase):
             ("max_running_jobs", "1"),
         )
 
-        status, first = self.post("/api/jobs", {"text": "user1|pass1"}, token="key-a")
+        status, first = self.post("/api/jobs", {"text": "user01|pass1"}, token="key-a")
         self.assertEqual(status, 200)
 
-        status, rejected = self.post_error("/api/jobs", {"text": "user2|pass2"}, token="key-b")
+        status, rejected = self.post_error("/api/jobs", {"text": "user02|pass2"}, token="key-b")
         self.assertEqual(status, 429)
         self.assertEqual(rejected["code"], "JOB_LIMIT_REACHED")
         self.assertEqual(rejected["running_jobs"], 1)
@@ -834,14 +939,14 @@ class JobCreationRaceTest(unittest.TestCase):
         self.assertEqual(stopped["status"], "stopping")
         self.wait_for_job_status(first["job_id"])
 
-        status, second = self.post("/api/jobs", {"text": "user2|pass2"}, token="key-b")
+        status, second = self.post("/api/jobs", {"text": "user02|pass2"}, token="key-b")
         self.assertEqual(status, 200)
         self.assertNotEqual(second["job_id"], first["job_id"])
 
     def test_two_jobs_can_be_stopped_at_the_same_time(self) -> None:
         self.store.block_once = False
-        _, first = self.post("/api/jobs", {"text": "user1|pass1\nuser2|pass2"}, token="key-a")
-        _, second = self.post("/api/jobs", {"text": "user3|pass3\nuser4|pass4"}, token="key-b")
+        _, first = self.post("/api/jobs", {"text": "user01|pass1\nuser02|pass2"}, token="key-a")
+        _, second = self.post("/api/jobs", {"text": "user03|pass3\nuser04|pass4"}, token="key-b")
 
         original = MasterHandler._finalize_unresolved_accounts
         counter_lock = threading.Lock()
@@ -901,7 +1006,7 @@ class JobCreationRaceTest(unittest.TestCase):
     def test_stop_request_returns_before_slow_finalization_finishes(self) -> None:
         self.store.block_once = False
         _, created = self.post(
-            "/api/jobs", {"text": "user1|pass1\nuser2|pass2"}, token="key-a"
+            "/api/jobs", {"text": "user01|pass1\nuser02|pass2"}, token="key-a"
         )
         job_id = created["job_id"]
         entered = threading.Event()
