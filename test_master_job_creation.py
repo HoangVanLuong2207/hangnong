@@ -113,6 +113,62 @@ class ParseAccountsValidationTest(unittest.TestCase):
         )
         self.assertEqual([item.line_number for item in invalid], [3, 4, 5, 6])
 
+    def test_junk_rules_cover_placeholders_urls_tokens_profiles_and_weak_passwords(self) -> None:
+        accounts = master_server.parse_accounts("\n".join((
+            "wirawan0799|UNKNOWN",
+            "Jeen.123|sso.garena.com",
+            "profile01|Google_[Chrome]_Profile4",
+            "tokenusr|c2b598c2-f0b7-4f45-9cab-ed5c19ed9177",
+            "shortusr|234",
+            "jesran|jesran",
+            "В±Р’В»Р’В§y|Thaithuy96",
+            "gooduser|Secure123",
+        )))
+
+        valid, invalid, junk = master_server.partition_accounts_for_job(accounts)
+
+        self.assertEqual([item.account for item in valid], ["gooduser"])
+        self.assertEqual(invalid, [])
+        self.assertEqual(len(junk), 7)
+        self.assertIn("Placeholder", junk[0].reason)
+        self.assertIn("domain", junk[1].reason)
+        self.assertIn("Chrome profile", junk[2].reason)
+        self.assertIn("UUID", junk[3].reason)
+        self.assertIn("ngắn hơn 6", junk[4].reason)
+        self.assertIn("giống nhau", junk[5].reason)
+        self.assertIn("mojibake", junk[6].reason)
+
+    def test_clone_farm_requires_ten_same_prefix_and_password_accounts(self) -> None:
+        text = "\n".join(
+            [f"benzkip{index}|it6sw57m" for index in range(10)]
+            + ["normaluser|StrongPass9"]
+        )
+
+        valid, invalid, junk = master_server.partition_accounts_for_job(
+            master_server.parse_accounts(text)
+        )
+
+        self.assertEqual([item.account for item in valid], ["normaluser"])
+        self.assertEqual(invalid, [])
+        self.assertEqual(len(junk), 10)
+        self.assertTrue(all("clone hàng loạt" in item.reason for item in junk))
+
+    def test_repeated_password_farm_requires_twenty_distinct_users(self) -> None:
+        text = "\n".join(
+            [f"groupa{index}|danan777" for index in range(10)]
+            + [f"groupb{index}|danan777" for index in range(10)]
+            + ["normaluser|AnotherPass9"]
+        )
+
+        valid, invalid, junk = master_server.partition_accounts_for_job(
+            master_server.parse_accounts(text)
+        )
+
+        self.assertEqual([item.account for item in valid], ["normaluser"])
+        self.assertEqual(invalid, [])
+        self.assertEqual(len(junk), 20)
+        self.assertTrue(all("dùng chung một mật khẩu" in item.reason for item in junk))
+
 
 class InvalidUsernameJobFlowTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -154,37 +210,48 @@ class InvalidUsernameJobFlowTest(unittest.TestCase):
         with urllib.request.urlopen(request, timeout=10) as response:
             return json.loads(response.read().decode("utf-8"))
 
-    def test_warns_then_filters_stores_groups_and_exports_invalid_user(self) -> None:
+    def test_warns_then_filters_stores_groups_and_exports_rejected_accounts(self) -> None:
         body = {
-            "text": "Valid_1|pass\n_badusr|secret",
+            "text": "Valid_1|secret12\n_badusr|secret12\nvalidtwo|UNKNOWN",
             "billing_mode": "quantity",
         }
         status, warning = self.post_error(body)
 
         self.assertEqual(status, 409)
-        self.assertEqual(warning["code"], "INVALID_USERNAMES_REQUIRE_CONFIRMATION")
+        self.assertEqual(warning["code"], "FILTERED_ACCOUNTS_REQUIRE_CONFIRMATION")
         self.assertEqual(warning["valid_accounts"], 1)
         self.assertEqual(warning["invalid_accounts"], 1)
+        self.assertEqual(warning["junk_accounts_count"], 1)
         self.assertEqual(self.store.fetchone("SELECT COUNT(*) FROM jobs")[0], 0)
 
-        body["confirm_invalid_usernames"] = True
+        body["confirm_filtered_accounts"] = True
         status, created = self.post_error(body)
         self.assertEqual(status, 200)
         self.assertTrue(created["ok"])
         self.assertEqual(created["total"], 1)
         self.assertEqual(created["invalid_accounts"], 1)
+        self.assertEqual(created["junk_accounts_count"], 1)
         job_id = created["job_id"]
 
         saved = self.store.fetchone(
             "SELECT line_number,username,raw_line,reason FROM invalid_usernames WHERE job_id=?",
             (job_id,),
         )
-        self.assertEqual(saved[:3], (2, "_badusr", "_badusr|secret"))
+        self.assertEqual(saved[:3], (2, "_badusr", "_badusr|secret12"))
         self.assertIn("bắt đầu", saved[3])
 
         invalid_group = self.get_json(f"/api/jobs/{job_id}/rows?filter=INVALID")
         self.assertEqual(invalid_group["category_counts"]["INVALID"], 1)
         self.assertEqual(invalid_group["rows"][0]["account"], "_badusr")
+
+        junk_group = self.get_json(f"/api/jobs/{job_id}/rows?filter=JUNK")
+        self.assertEqual(junk_group["category_counts"]["JUNK"], 1)
+        self.assertEqual(junk_group["rows"][0]["account"], "validtwo")
+        all_rejected = self.get_json(f"/api/jobs/{job_id}/rows?filter=ALL")
+        self.assertEqual(all_rejected["total_all"], 2)
+        self.assertEqual({row["result_type"] for row in all_rejected["rows"]}, {
+            "invalid username", "junk data",
+        })
 
         request = urllib.request.Request(
             self.base_url + f"/api/jobs/{job_id}/export.xlsx?min_level=12",
@@ -197,9 +264,13 @@ class InvalidUsernameJobFlowTest(unittest.TestCase):
         workbook = openpyxl.load_workbook(io.BytesIO(workbook_bytes), read_only=True)
         try:
             self.assertIn("USER không hợp lệ", workbook.sheetnames)
+            self.assertIn("DATA rác", workbook.sheetnames)
             row = list(workbook["USER không hợp lệ"].iter_rows(min_row=2, values_only=True))[0]
             self.assertEqual(row[0], "2")
-            self.assertEqual(row[1], "_badusr|secret")
+            self.assertEqual(row[1], "_badusr|secret12")
+            junk_row = list(workbook["DATA rác"].iter_rows(min_row=2, values_only=True))[0]
+            self.assertEqual(junk_row[0], "3")
+            self.assertEqual(junk_row[1], "validtwo|UNKNOWN")
         finally:
             workbook.close()
 
@@ -299,7 +370,7 @@ class JobCreationRaceTest(unittest.TestCase):
 
         def create_job() -> None:
             try:
-                text = "\n".join(f"user{index:02d}|pass{index}" for index in range(31))
+                text = "\n".join(f"user{index:02d}|password{index}" for index in range(31))
                 created["response"] = self.post("/api/jobs", {"text": text, "billing_mode": "quantity"})
             except Exception as exc:  # pragma: no cover - surfaced by assertion below
                 created["error"] = exc
@@ -367,7 +438,7 @@ class JobCreationRaceTest(unittest.TestCase):
         self.store.block_once = False
         status, created = self.post(
             "/api/jobs",
-            {"text": "vvip-user|pass"},
+            {"text": "vvip-user|password"},
         )
         self.assertEqual(status, 200)
         self.assertEqual(created["queue_type"], "vvip")
@@ -797,7 +868,7 @@ class JobCreationRaceTest(unittest.TestCase):
             "INSERT INTO app_settings (setting_key, setting_value) VALUES (?,?)",
             ("max_accounts_per_job", "1"),
         )
-        text = "user01|pass1\nuser02|pass2"
+        text = "user01|password1\nuser02|password2"
 
         status, rejected = self.post_error("/api/jobs", {"text": text}, token="regular-key")
         self.assertEqual(status, 413)
@@ -813,21 +884,21 @@ class JobCreationRaceTest(unittest.TestCase):
     def test_each_regular_key_can_only_have_one_running_job(self) -> None:
         self.store.block_once = False
 
-        status, first = self.post("/api/jobs", {"text": "user01|pass1"}, token="key-a")
+        status, first = self.post("/api/jobs", {"text": "user01|password1"}, token="key-a")
         self.assertEqual(status, 200)
 
-        status, rejected = self.post_error("/api/jobs", {"text": "user02|pass2"}, token="key-a")
+        status, rejected = self.post_error("/api/jobs", {"text": "user02|password2"}, token="key-a")
         self.assertEqual(status, 409)
         self.assertEqual(rejected["code"], "KEY_RUNNING_JOB_LIMIT_REACHED")
         self.assertEqual(rejected["active_job_id"], first["job_id"])
 
-        status, other_key_job = self.post("/api/jobs", {"text": "user03|pass3"}, token="key-b")
+        status, other_key_job = self.post("/api/jobs", {"text": "user03|password3"}, token="key-b")
         self.assertEqual(status, 200)
         self.assertNotEqual(other_key_job["job_id"], first["job_id"])
 
     def test_expired_key_can_read_history_but_cannot_create_job(self) -> None:
         self.store.block_once = False
-        _, created = self.post("/api/jobs", {"text": "history-user|pass"}, token="expired-key")
+        _, created = self.post("/api/jobs", {"text": "history-user|password"}, token="expired-key")
         job_id = created["job_id"]
 
         with mock.patch.object(
@@ -864,7 +935,7 @@ class JobCreationRaceTest(unittest.TestCase):
             self.assertFalse(forbidden["ok"])
 
             status, rejected = self.post_error(
-                "/api/jobs", {"text": "new-user|pass"}, token="expired-key"
+                "/api/jobs", {"text": "new-user|password"}, token="expired-key"
             )
             self.assertEqual(status, 401)
             self.assertFalse(rejected["ok"])
@@ -872,10 +943,10 @@ class JobCreationRaceTest(unittest.TestCase):
     def test_admin_key_is_exempt_from_running_job_limit_per_key(self) -> None:
         self.store.block_once = False
 
-        status, first = self.post("/api/jobs", {"text": "admin1|pass1"})
+        status, first = self.post("/api/jobs", {"text": "admin1|password1"})
         self.assertEqual(status, 200)
 
-        status, second = self.post("/api/jobs", {"text": "admin2|pass2"})
+        status, second = self.post("/api/jobs", {"text": "admin2|password2"})
         self.assertEqual(status, 200)
         self.assertNotEqual(second["job_id"], first["job_id"])
 
@@ -924,10 +995,10 @@ class JobCreationRaceTest(unittest.TestCase):
             ("max_running_jobs", "1"),
         )
 
-        status, first = self.post("/api/jobs", {"text": "user01|pass1"}, token="key-a")
+        status, first = self.post("/api/jobs", {"text": "user01|password1"}, token="key-a")
         self.assertEqual(status, 200)
 
-        status, rejected = self.post_error("/api/jobs", {"text": "user02|pass2"}, token="key-b")
+        status, rejected = self.post_error("/api/jobs", {"text": "user02|password2"}, token="key-b")
         self.assertEqual(status, 429)
         self.assertEqual(rejected["code"], "JOB_LIMIT_REACHED")
         self.assertEqual(rejected["running_jobs"], 1)
@@ -939,14 +1010,14 @@ class JobCreationRaceTest(unittest.TestCase):
         self.assertEqual(stopped["status"], "stopping")
         self.wait_for_job_status(first["job_id"])
 
-        status, second = self.post("/api/jobs", {"text": "user02|pass2"}, token="key-b")
+        status, second = self.post("/api/jobs", {"text": "user02|password2"}, token="key-b")
         self.assertEqual(status, 200)
         self.assertNotEqual(second["job_id"], first["job_id"])
 
     def test_two_jobs_can_be_stopped_at_the_same_time(self) -> None:
         self.store.block_once = False
-        _, first = self.post("/api/jobs", {"text": "user01|pass1\nuser02|pass2"}, token="key-a")
-        _, second = self.post("/api/jobs", {"text": "user03|pass3\nuser04|pass4"}, token="key-b")
+        _, first = self.post("/api/jobs", {"text": "user01|password1\nuser02|password2"}, token="key-a")
+        _, second = self.post("/api/jobs", {"text": "user03|password3\nuser04|password4"}, token="key-b")
 
         original = MasterHandler._finalize_unresolved_accounts
         counter_lock = threading.Lock()
@@ -1006,7 +1077,7 @@ class JobCreationRaceTest(unittest.TestCase):
     def test_stop_request_returns_before_slow_finalization_finishes(self) -> None:
         self.store.block_once = False
         _, created = self.post(
-            "/api/jobs", {"text": "user01|pass1\nuser02|pass2"}, token="key-a"
+            "/api/jobs", {"text": "user01|password1\nuser02|password2"}, token="key-a"
         )
         job_id = created["job_id"]
         entered = threading.Event()
@@ -1096,7 +1167,7 @@ class JobCreationRaceTest(unittest.TestCase):
         self.store.block_once = False
         self.server._satellite_idle_since = 0
         self.server._satellite_idle_restarted = True
-        status, created = self.post("/api/jobs", {"text": "idle-reset|pass"})
+        status, created = self.post("/api/jobs", {"text": "idle-reset|password"})
         self.assertEqual(status, 200)
         self.assertTrue(created["job_id"])
         self.assertIsNone(self.server._satellite_idle_since)

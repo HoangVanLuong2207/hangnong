@@ -50,7 +50,7 @@ class ExportDateTests(unittest.TestCase):
         handler.path = "/api/jobs/sample/export.xlsx?min_level=12"
         handler._check_job_access = Mock(return_value=(True, {"id": "sample"}))
         store = Mock()
-        store.fetch.side_effect = [[(1, json.dumps(row)) for row in self.rows()], [], []]
+        store.fetch.side_effect = [[(1, json.dumps(row)) for row in self.rows()], [], [], []]
         handler.server = SimpleNamespace(store=store)
         handler._handle_job_export_xlsx("sample", {})
         self.check_workbook(handler)

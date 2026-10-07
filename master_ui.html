@@ -1783,6 +1783,7 @@ table.data-table tbody tr:hover {
           <div class="filter-tab" data-filter="FAIL" onclick="setResultFilter('FAIL')"><i class="fa-solid fa-circle-xmark" style="color:#DC2626"></i> Không thể log <span class="filter-count" id="count_FAIL"></span></div>
           <div class="filter-tab" data-filter="PENDING" onclick="setResultFilter('PENDING')"><i class="fa-solid fa-hourglass-half" style="color:#64748B"></i> Chưa thể check <span class="filter-count" id="count_PENDING"></span></div>
           <div class="filter-tab" data-filter="INVALID" onclick="setResultFilter('INVALID')"><i class="fa-solid fa-user-slash" style="color:#B91C1C"></i> USER không hợp lệ <span class="filter-count" id="count_INVALID"></span></div>
+          <div class="filter-tab" data-filter="JUNK" onclick="setResultFilter('JUNK')"><i class="fa-solid fa-filter-circle-xmark" style="color:#7F1D1D"></i> DATA rác <span class="filter-count" id="count_JUNK"></span></div>
         </div>
         <div class="results-search-wrap">
           <i class="fa-solid fa-magnifying-glass"></i>
@@ -1979,6 +1980,7 @@ table.data-table tbody tr:hover {
         <h2 id="submitModalTitle"><i class="fa-solid fa-clipboard-list" style="color:var(--secondary)"></i> Thêm Tài Khoản Kiểm Tra</h2>
         <p>Định dạng linh động: <code>user|pass</code>, <code>user:pass</code>, <code>user:pass|mail</code>… Dấu <code>:</code> và <code>|</code> đều được tự nhận diện.</p>
         <p><strong>Quy tắc USER:</strong> 6–18 ký tự; chỉ gồm <code>a-z</code>, <code>A-Z</code>, <code>0-9</code>, <code>_</code>, <code>-</code>, <code>.</code>; phải bắt đầu/kết thúc bằng chữ hoặc số và có ít nhất một chữ cái.</p>
+        <p><strong>Lọc DATA rác:</strong> placeholder/lỗi giải mã, URL-domain-callback, token/profile trình duyệt, lỗi bảng mã, mật khẩu dưới 6 ký tự, USER trùng PASS và mẫu clone hàng loạt.</p>
       </div>
       <button class="icon-btn" title="Đóng" onclick="closeModal('submitModal')"><i class="fa-solid fa-xmark"></i></button>
     </div>
@@ -2363,36 +2365,99 @@ function clearAccountsInput() {
   toast('🧹 Đã xóa danh sách tài khoản');
 }
 
-function analyzeUsernameInput(text) {
+function analyzeAccountsInput(text) {
   const usernamePattern = /^(?=.{6,18}$)(?=.*[A-Za-z])[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
+  const domainPattern = /^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?\.)+[A-Za-z]{2,24}(?::\d{1,5})?(?:[\/#?].*)?$/;
+  const placeholders = new Set(['unknown', 'none', 'null', 'missing', 'missingpass', 'notsaved', 'fail', 'failed', 'decryption', 'decrypt', 'decryptionfailed']);
+  const protocols = new Set(['http', 'https', 'ttp', 'ttps', 'ftp', 'sso']);
   const lines = text ? text.split(/\r?\n/).filter(line => {
     const value = line.trim();
     return value.length > 0 && !value.startsWith('#');
   }) : [];
-  let valid = 0;
-  for (const rawLine of lines) {
+  const parsed = lines.map((rawLine, index) => {
     const line = rawLine.trim();
-    const separator = line.search(/[|:]/);
-    const username = separator > 0 ? line.slice(0, separator).trim() : '';
-    if (usernamePattern.test(username)) valid++;
-  }
-  return { total: lines.length, valid, invalid: lines.length - valid };
+    const parts = line.split(/[|:]/);
+    return { lineNumber: index + 1, username: (parts[0] || '').trim(), password: (parts[1] || '').trim() };
+  });
+  const marker = value => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const isJunk = item => {
+    const username = item.username;
+    const password = item.password;
+    const userLower = username.toLowerCase();
+    const passLower = password.toLowerCase();
+    if (placeholders.has(marker(username)) || placeholders.has(marker(password))) return true;
+    if (protocols.has(passLower) || passLower.startsWith('http://') || passLower.startsWith('https://')) return true;
+    if (domainPattern.test(username) || domainPattern.test(password)) return true;
+    if (/\.(?:html?|php\d?|aspx?|jsp)$/i.test(username)) return true;
+    if (['direct', 'redirect', 'callback'].includes(userLower) && ['link', 'url', 'callback', 'redirect'].includes(passLower)) return true;
+    if (/^Google_\[Chrome\]_Profile\d*$/i.test(password)) return true;
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(password)) return true;
+    if (password.length >= 40 && (/^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+){1,2}$/.test(password) || /^[A-Za-z0-9_+/=-]{48,}$/.test(password))) return true;
+    if (['\uFFFD', '\u00EF\u00BF\u00BD', '\u00C3', '\u00C2', '\u00D0', '\u0430\u0451']
+      .some(markerValue => username.includes(markerValue)) || /[\u0400-\u04FF]/.test(username)) return true;
+    if (password.length < 6) return true;
+    if (passLower === userLower || passLower.replace(/\.+$/, '') === userLower) return true;
+    return false;
+  };
+  const junkIndexes = new Set();
+  const eligible = [];
+  let invalid = 0;
+  parsed.forEach((item, index) => {
+    if (isJunk(item)) junkIndexes.add(index);
+    else if (!usernamePattern.test(item.username)) invalid++;
+    else eligible.push({ ...item, index });
+  });
+  const cloneGroups = new Map();
+  const passwordGroups = new Map();
+  eligible.forEach(item => {
+    if (!passwordGroups.has(item.password)) passwordGroups.set(item.password, []);
+    passwordGroups.get(item.password).push(item);
+    const match = item.username.match(/^(.{3,}?)(\d{1,8})$/);
+    if (!match) return;
+    const key = item.password + '\u0000' + match[1].toLowerCase();
+    if (!cloneGroups.has(key)) cloneGroups.set(key, []);
+    cloneGroups.get(key).push(item);
+  });
+  cloneGroups.forEach(group => {
+    if (new Set(group.map(item => item.username.toLowerCase())).size >= 10) {
+      group.forEach(item => junkIndexes.add(item.index));
+    }
+  });
+  passwordGroups.forEach(group => {
+    if (new Set(group.map(item => item.username.toLowerCase())).size >= 20) {
+      group.forEach(item => junkIndexes.add(item.index));
+    }
+  });
+  const junk = junkIndexes.size;
+  const valid = lines.length - invalid - junk;
+  return { total: lines.length, valid, invalid, junk };
+}
+
+function analyzeUsernameInput(text) {
+  return analyzeAccountsInput(text);
+}
+
+function filteredAccountSummary(analysis) {
+  let summary = formatNumber(analysis.valid) + ' hợp lệ';
+  if (analysis.invalid) summary += ' · ' + formatNumber(analysis.invalid) + ' USER không hợp lệ';
+  if (analysis.junk) summary += ' · ' + formatNumber(analysis.junk) + ' DATA rác';
+  return summary;
 }
 
 function updateAccountCounter() {
   const text = (document.getElementById('accInput')?.value || '').trim();
-  const analysis = analyzeUsernameInput(text);
+  const analysis = analyzeAccountsInput(text);
   const el = document.getElementById('accCounter');
   if (el) {
     const selectedMode = selectedBillingMode();
     const activeLimit = selectedMode === 'vvip' ? maxVvipAccountsPerJob : (!isAdminKey ? maxAccountsPerJob : null);
     const overLimit = Number.isInteger(activeLimit) && analysis.valid > activeLimit;
-    el.textContent = formatNumber(analysis.valid) + ' hợp lệ' + (analysis.invalid ? ' · ' + formatNumber(analysis.invalid) + ' USER không hợp lệ' : '') + (
+    el.textContent = filteredAccountSummary(analysis) + (
       Number.isInteger(activeLimit)
         ? ' / tối đa ' + formatNumber(activeLimit) + (selectedMode === 'vvip' ? ' VVIP' : '')
         : ''
     );
-    el.style.color = overLimit || analysis.invalid ? 'var(--danger)' : '';
+    el.style.color = overLimit || analysis.invalid || analysis.junk ? 'var(--danger)' : '';
   }
   scheduleQuote();
 }
@@ -2581,7 +2646,7 @@ async function refreshQuote() {
   if (!target || (!currentSession && !TOKEN)) return;
   const mode = selectedBillingMode();
   const text = (document.getElementById('accInput')?.value || '').trim();
-  const submittedCount = analyzeUsernameInput(text).valid;
+  const submittedCount = analyzeAccountsInput(text).valid;
   const blockCount = Math.max(1, Math.min(48, Number(document.getElementById('blockCount')?.value || 1)));
   if (mode === 'quantity' && submittedCount < 1) {
     target.textContent = 'Nhập danh sách để xem chi phí dự kiến.';
@@ -2655,27 +2720,35 @@ async function sendJob() {
   btn.disabled = true;
   btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin-fast"></i> Đang gửi...';
   try {
-    const submit = confirmInvalidUsernames => api('/api/jobs', {
+    const submit = confirmFilteredAccounts => api('/api/jobs', {
         method: 'POST',
         body: JSON.stringify({
           text,
           billing_mode: billingMode,
           block_count: blockCount,
           confirm_quantity_while_timed: confirmQuantityWhileTimed,
-          confirm_invalid_usernames: confirmInvalidUsernames,
+          confirm_filtered_accounts: confirmFilteredAccounts,
         })
       });
     let d = await submit(false);
-    if (!d.ok && d.code === 'INVALID_USERNAMES_REQUIRE_CONFIRMATION') {
-      const examples = (d.invalid_usernames || []).slice(0, 12).map(item =>
-        '• Dòng ' + item.line_number + ': ' + item.username + ' — ' + item.reason
-      ).join('\n');
-      const more = d.invalid_usernames_truncated || Number(d.invalid_accounts || 0) > 12
-        ? '\n• ...và các USER không hợp lệ khác'
+    if (!d.ok && ['FILTERED_ACCOUNTS_REQUIRE_CONFIRMATION', 'INVALID_USERNAMES_REQUIRE_CONFIRMATION'].includes(d.code)) {
+      const invalidExamples = (d.invalid_usernames || []).slice(0, 6).map(item =>
+        '• USER sai · Dòng ' + item.line_number + ': ' + item.username + ' — ' + item.reason
+      );
+      const junkExamples = (d.junk_accounts || []).slice(0, 6).map(item =>
+        '• DATA rác · Dòng ' + item.line_number + ': ' + item.username + ' — ' + item.reason
+      );
+      const examples = invalidExamples.concat(junkExamples).join('\n');
+      const more = d.invalid_usernames_truncated || d.junk_accounts_truncated ||
+        Number(d.invalid_accounts || 0) > invalidExamples.length ||
+        Number(d.junk_accounts_count || 0) > junkExamples.length
+        ? '\n• ...và các dòng bị loại khác'
         : '';
       const accepted = confirm(
-        'Phát hiện ' + formatNumber(d.invalid_accounts || 0) + ' USER không hợp lệ.\n\n' +
-        examples + more + '\n\nNếu tiếp tục, các tài khoản này sẽ không được chạy và được lưu vào nhóm “USER không hợp lệ”. Bạn vẫn muốn tạo job?'
+        'Rà soát trước khi tạo job:\n' +
+        '• ' + formatNumber(d.invalid_accounts || 0) + ' USER không hợp lệ\n' +
+        '• ' + formatNumber(d.junk_accounts_count || 0) + ' DATA rác\n\n' +
+        examples + more + '\n\nNếu tiếp tục, các dòng này sẽ không được chạy/tính phí và được lưu vào nhóm tương ứng. Bạn vẫn muốn tạo job?'
       );
       if (!accepted) return;
       d = await submit(true);
@@ -2684,7 +2757,10 @@ async function sendJob() {
       const invalidNote = Number(d.invalid_accounts || 0) > 0
         ? ' · đã loại ' + formatNumber(d.invalid_accounts) + ' USER không hợp lệ'
         : '';
-      toast('🚀 Đã tạo Job #' + d.job_id + ' (' + formatNumber(d.total) + ' acc)' + invalidNote + '!');
+      const junkNote = Number(d.junk_accounts_count || 0) > 0
+        ? ' · ' + formatNumber(d.junk_accounts_count) + ' DATA rác'
+        : '';
+      toast('🚀 Đã tạo Job #' + d.job_id + ' (' + formatNumber(d.total) + ' acc)' + invalidNote + junkNote + '!');
       await loadSession(false);
       document.getElementById('accInput').value = '';
       updateAccountCounter();
@@ -3016,6 +3092,7 @@ function getRowCategory(row, minLevel = 12) {
   const lvNum = /^\d+$/.test(lvStr) ? Number(lvStr) : NaN;
 
   if (rt === 'invalid username') return 'INVALID';
+  if (rt === 'junk data') return 'JUNK';
 
   if (st === 'CHƯA THỂ CHECK' || rt === 'chưa thể check') {
     return 'PENDING';
@@ -3044,7 +3121,8 @@ function updateFilterTabCounts(categoryCounts, totalAll) {
     LOCKED: Number(categoryCounts?.LOCKED || 0),
     FAIL: Number(categoryCounts?.FAIL || 0),
     PENDING: Number(categoryCounts?.PENDING || 0),
-    INVALID: Number(categoryCounts?.INVALID || 0)
+    INVALID: Number(categoryCounts?.INVALID || 0),
+    JUNK: Number(categoryCounts?.JUNK || 0)
   };
   for (const k of Object.keys(counts)) {
     const el = document.getElementById('count_' + k);
@@ -3124,6 +3202,10 @@ function renderFilteredRows() {
       tagClass = 'tag-badge fail';
       tagIcon = '<i class="fa-solid fa-user-slash"></i>';
       tagText = 'USER không hợp lệ';
+    } else if (cat === 'JUNK') {
+      tagClass = 'tag-badge fail';
+      tagIcon = '<i class="fa-solid fa-filter-circle-xmark"></i>';
+      tagText = 'DATA rác';
     } else {
       tagClass = 'tag-badge fail';
       tagIcon = '<i class="fa-solid fa-circle-xmark"></i>';
@@ -3243,6 +3325,7 @@ async function refreshDetail(forceRows = true) {
       '<div class="stat-box fail"><div class="num">' + formatNumber(r.fail || 0) + '</div><div class="lbl">Không thể log</div></div>' +
       '<div class="stat-box pending"><div class="num">' + formatNumber(r.uncheckable || 0) + '</div><div class="lbl">Chưa thể check</div></div>' +
       '<div class="stat-box fail"><div class="num">' + formatNumber(r.invalid || 0) + '</div><div class="lbl">USER không hợp lệ</div></div>' +
+      '<div class="stat-box fail"><div class="num">' + formatNumber(r.junk || 0) + '</div><div class="lbl">DATA rác</div></div>' +
       '<div class="stat-box"><div class="num">' + formatNumber(c.pending) + ' / ' + formatNumber(c.claimed) + '</div><div class="lbl">Chunks chờ / chạy</div></div>';
 
     if (shouldLoadRows) {
