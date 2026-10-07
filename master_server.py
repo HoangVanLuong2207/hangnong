@@ -1421,8 +1421,6 @@ UUID_PATTERN = re.compile(
     r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
 )
 PROFILE_PATTERN = re.compile(r"^Google_\[Chrome\]_Profile\d*$", re.IGNORECASE)
-CLONE_FARM_MIN_ACCOUNTS = 10
-REPEATED_PASSWORD_MIN_ACCOUNTS = 20
 SYSTEM_PLACEHOLDERS = {
     "unknown", "none", "null", "missing", "missingpass", "notsaved",
     "fail", "failed", "decryption", "decrypt", "decryptionfailed",
@@ -1498,49 +1496,6 @@ def partition_accounts_for_job(
         else:
             valid.append(account)
 
-    clone_groups: dict[tuple[str, str], list[ParsedAccount]] = {}
-    password_groups: dict[str, list[ParsedAccount]] = {}
-    for account in valid:
-        password_groups.setdefault(account.password, []).append(account)
-        match = re.fullmatch(r"(.{3,}?)(\d{1,8})", account.account)
-        if match:
-            clone_groups.setdefault((account.password, match.group(1).casefold()), []).append(account)
-    clone_lines = {
-        account.line_number
-        for group in clone_groups.values()
-        if len({item.account.casefold() for item in group}) >= CLONE_FARM_MIN_ACCOUNTS
-        for account in group
-    }
-    repeated_password_lines = {
-        account.line_number
-        for group in password_groups.values()
-        if len({item.account.casefold() for item in group}) >= REPEATED_PASSWORD_MIN_ACCOUNTS
-        for account in group
-    }
-    farm_lines = clone_lines | repeated_password_lines
-    if farm_lines:
-        retained: list[ParsedAccount] = []
-        for account in valid:
-            if account.line_number in farm_lines:
-                reason = (
-                    f"Mẫu spam hàng loạt: ít nhất {REPEATED_PASSWORD_MIN_ACCOUNTS} USER "
-                    "dùng chung một mật khẩu"
-                    if account.line_number in repeated_password_lines
-                    else (
-                        f"Mẫu clone hàng loạt: ít nhất {CLONE_FARM_MIN_ACCOUNTS} USER "
-                        "cùng tiền tố, hậu tố số và mật khẩu"
-                    )
-                )
-                junk.append(JunkAccount(
-                    account.line_number,
-                    account.account,
-                    account.raw_line or f"{account.account}|{account.password}",
-                    reason,
-                ))
-            else:
-                retained.append(account)
-        valid = retained
-
     junk.sort(key=lambda item: item.line_number)
     return valid, invalid, junk
 
@@ -1582,6 +1537,15 @@ def parse_accounts(text: str) -> list[ParsedAccount]:
 
 def split_chunks(accounts: list[ParsedAccount], chunk_size: int) -> list[list[ParsedAccount]]:
     return [accounts[i : i + chunk_size] for i in range(0, len(accounts), chunk_size)]
+
+
+def _result_storage_key(account: str, row: dict[str, Any]) -> str:
+    """Identify a result by its position so one USER may be tested with many passwords."""
+    try:
+        row_index = int(str(row.get("stt") or "0"))
+    except (TypeError, ValueError):
+        row_index = 0
+    return f"{row_index}:{account}" if row_index > 0 else account
 
 
 def select_fair_claim_candidate(
@@ -1825,7 +1789,7 @@ def _finalize_unresolved_job_accounts(store: Any, job_id: int, now: float) -> in
                 "args": [
                     chunk_id,
                     job_id,
-                    account,
+                    _result_storage_key(account, row),
                     json.dumps(row, ensure_ascii=False),
                     now,
                 ],
@@ -3868,7 +3832,13 @@ class MasterHandler(BaseHTTPRequestHandler):
                 continue
             stmts.append({
                 "sql": "INSERT INTO results (chunk_id, job_id, account, row_json, reported_at) VALUES (?,?,?,?,?) ON CONFLICT(chunk_id, account) DO UPDATE SET row_json=excluded.row_json, reported_at=excluded.reported_at",
-                "args": [chunk_id, job_id, account, json.dumps(row, ensure_ascii=False), now],
+                "args": [
+                    chunk_id,
+                    job_id,
+                    _result_storage_key(account, row),
+                    json.dumps(row, ensure_ascii=False),
+                    now,
+                ],
             })
         if is_done:
             stmts.append({

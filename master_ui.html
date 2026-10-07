@@ -1980,7 +1980,7 @@ table.data-table tbody tr:hover {
         <h2 id="submitModalTitle"><i class="fa-solid fa-clipboard-list" style="color:var(--secondary)"></i> Thêm Tài Khoản Kiểm Tra</h2>
         <p>Định dạng linh động: <code>user|pass</code>, <code>user:pass</code>, <code>user:pass|mail</code>… Dấu <code>:</code> và <code>|</code> đều được tự nhận diện.</p>
         <p><strong>Quy tắc USER:</strong> 6–18 ký tự; chỉ gồm <code>a-z</code>, <code>A-Z</code>, <code>0-9</code>, <code>_</code>, <code>-</code>, <code>.</code>; phải bắt đầu/kết thúc bằng chữ hoặc số và có ít nhất một chữ cái.</p>
-        <p><strong>Lọc DATA rác:</strong> placeholder/lỗi giải mã, URL-domain-callback, token/profile trình duyệt, lỗi bảng mã, mật khẩu dưới 6 ký tự, USER trùng PASS và mẫu clone hàng loạt.</p>
+        <p><strong>Lọc DATA rác:</strong> placeholder/lỗi giải mã, URL-domain-callback, token/profile trình duyệt, lỗi bảng mã, mật khẩu dưới 6 ký tự và USER trùng PASS. Cho phép nhiều USER chung password hoặc một USER có nhiều password.</p>
       </div>
       <button class="icon-btn" title="Đóng" onclick="closeModal('submitModal')"><i class="fa-solid fa-xmark"></i></button>
     </div>
@@ -2400,33 +2400,10 @@ function analyzeAccountsInput(text) {
     return false;
   };
   const junkIndexes = new Set();
-  const eligible = [];
   let invalid = 0;
   parsed.forEach((item, index) => {
     if (isJunk(item)) junkIndexes.add(index);
     else if (!usernamePattern.test(item.username)) invalid++;
-    else eligible.push({ ...item, index });
-  });
-  const cloneGroups = new Map();
-  const passwordGroups = new Map();
-  eligible.forEach(item => {
-    if (!passwordGroups.has(item.password)) passwordGroups.set(item.password, []);
-    passwordGroups.get(item.password).push(item);
-    const match = item.username.match(/^(.{3,}?)(\d{1,8})$/);
-    if (!match) return;
-    const key = item.password + '\u0000' + match[1].toLowerCase();
-    if (!cloneGroups.has(key)) cloneGroups.set(key, []);
-    cloneGroups.get(key).push(item);
-  });
-  cloneGroups.forEach(group => {
-    if (new Set(group.map(item => item.username.toLowerCase())).size >= 10) {
-      group.forEach(item => junkIndexes.add(item.index));
-    }
-  });
-  passwordGroups.forEach(group => {
-    if (new Set(group.map(item => item.username.toLowerCase())).size >= 20) {
-      group.forEach(item => junkIndexes.add(item.index));
-    }
   });
   const junk = junkIndexes.size;
   const valid = lines.length - invalid - junk;

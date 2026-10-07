@@ -138,36 +138,21 @@ class ParseAccountsValidationTest(unittest.TestCase):
         self.assertIn("giống nhau", junk[5].reason)
         self.assertIn("mojibake", junk[6].reason)
 
-    def test_clone_farm_requires_ten_same_prefix_and_password_accounts(self) -> None:
-        text = "\n".join(
-            [f"benzkip{index}|it6sw57m" for index in range(10)]
-            + ["normaluser|StrongPass9"]
-        )
-
-        valid, invalid, junk = master_server.partition_accounts_for_job(
-            master_server.parse_accounts(text)
-        )
-
-        self.assertEqual([item.account for item in valid], ["normaluser"])
-        self.assertEqual(invalid, [])
-        self.assertEqual(len(junk), 10)
-        self.assertTrue(all("clone hàng loạt" in item.reason for item in junk))
-
-    def test_repeated_password_farm_requires_twenty_distinct_users(self) -> None:
+    def test_repeated_users_and_passwords_are_allowed(self) -> None:
         text = "\n".join(
             [f"groupa{index}|danan777" for index in range(10)]
             + [f"groupb{index}|danan777" for index in range(10)]
-            + ["normaluser|AnotherPass9"]
+            + ["sameuser|Alpha123", "sameuser|Beta456"]
         )
 
         valid, invalid, junk = master_server.partition_accounts_for_job(
             master_server.parse_accounts(text)
         )
 
-        self.assertEqual([item.account for item in valid], ["normaluser"])
+        self.assertEqual(len(valid), 22)
+        self.assertEqual([item.account for item in valid[-2:]], ["sameuser", "sameuser"])
         self.assertEqual(invalid, [])
-        self.assertEqual(len(junk), 20)
-        self.assertTrue(all("dùng chung một mật khẩu" in item.reason for item in junk))
+        self.assertEqual(junk, [])
 
 
 class InvalidUsernameJobFlowTest(unittest.TestCase):
@@ -404,6 +389,39 @@ class JobCreationRaceTest(unittest.TestCase):
         status, claim = self.post("/api/claim", {"satellite_id": "race-satellite"})
         self.assertEqual(status, 200)
         self.assertEqual(claim["claim"]["job_id"], job_id)
+
+    def test_same_username_with_multiple_passwords_keeps_every_result(self) -> None:
+        self.store.block_once = False
+        status, created = self.post(
+            "/api/jobs",
+            {"text": "sameuser|Alpha123\nsameuser|Beta456", "billing_mode": "quantity"},
+        )
+        self.assertEqual(status, 200)
+        job_id = created["job_id"]
+        chunk_id = self.inner.fetchone(
+            "SELECT id FROM chunks WHERE job_id=? ORDER BY idx LIMIT 1", (job_id,)
+        )[0]
+
+        status, reported = self.post(
+            "/api/report",
+            {
+                "chunk_id": chunk_id,
+                "done": True,
+                "rows": [
+                    {"stt": "1", "account": "sameuser", "status": "FAIL", "result_type": "Sai pass"},
+                    {"stt": "2", "account": "sameuser", "status": "OK", "result_type": "Đúng pass"},
+                ],
+            },
+        )
+
+        self.assertEqual(status, 200)
+        self.assertTrue(reported["ok"])
+        rows = self.inner.fetch(
+            "SELECT account,row_json FROM results WHERE job_id=? ORDER BY id", (job_id,)
+        )
+        self.assertEqual(len(rows), 2)
+        self.assertEqual([json.loads(row_json)["stt"] for _, row_json in rows], ["1", "2"])
+        self.assertNotEqual(rows[0][0], rows[1][0])
 
     def test_normal_and_vvip_satellites_claim_only_their_own_queue(self) -> None:
         normal_job = self.inner.exec(
