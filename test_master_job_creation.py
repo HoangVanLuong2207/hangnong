@@ -128,21 +128,23 @@ class ParseAccountsValidationTest(unittest.TestCase):
 
         valid, invalid, junk = master_server.partition_accounts_for_job(accounts)
 
-        self.assertEqual([item.account for item in valid], ["gooduser"])
+        self.assertEqual([item.account for item in valid], ["nospecial", "gooduser"])
         self.assertEqual(invalid, [])
-        self.assertEqual(len(junk), 8)
+        self.assertEqual(len(junk), 7)
         self.assertIn("Placeholder", junk[0].reason)
         self.assertIn("domain", junk[1].reason)
         self.assertIn("Chrome profile", junk[2].reason)
         self.assertIn("UUID", junk[3].reason)
         self.assertIn("ngắn hơn 6", junk[4].reason)
-        self.assertIn("ký tự đặc biệt", junk[5].reason)
-        self.assertIn("giống nhau", junk[6].reason)
-        self.assertIn("mojibake", junk[7].reason)
+        self.assertIn("giống nhau", junk[5].reason)
+        self.assertIn("mojibake", junk[6].reason)
 
-    def test_password_special_character_excludes_account_delimiters(self) -> None:
+    def test_legacy_password_without_special_character_is_allowed(self) -> None:
         self.assertIsNone(master_server.junk_account_reason(
             master_server.ParsedAccount("gooduser", "Secure123!"),
+        ))
+        self.assertIsNone(master_server.junk_account_reason(
+            master_server.ParsedAccount("nospecial", "Secure123"),
         ))
         self.assertIsNone(master_server.junk_account_reason(
             master_server.ParsedAccount("dotpass1", "Secure.xyz"),
@@ -155,15 +157,6 @@ class ParseAccountsValidationTest(unittest.TestCase):
         ))
         self.assertIn("domain", master_server.junk_account_reason(
             master_server.ParsedAccount("maps.google.com", "Secure123!"),
-        ) or "")
-        self.assertIn("ký tự đặc biệt", master_server.junk_account_reason(
-            master_server.ParsedAccount("nospecial", "Secure123"),
-        ) or "")
-        self.assertIn("ký tự đặc biệt", master_server.junk_account_reason(
-            master_server.ParsedAccount("colonpass", "Secure123:"),
-        ) or "")
-        self.assertIn("ký tự đặc biệt", master_server.junk_account_reason(
-            master_server.ParsedAccount("pipepass", "Secure123|"),
         ) or "")
 
     def test_repeated_users_and_passwords_are_allowed(self) -> None:
