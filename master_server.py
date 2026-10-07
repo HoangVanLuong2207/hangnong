@@ -1469,8 +1469,6 @@ def junk_account_reason(account: ParsedAccount) -> str | None:
         return "Username bị lỗi mã hóa bảng mã (mojibake)"
     if len(password) < 6:
         return "Mật khẩu ngắn hơn 6 ký tự"
-    if password_folded == username_folded or password_folded.rstrip(".") == username_folded:
-        return "Username và password giống nhau"
     return None
 
 
