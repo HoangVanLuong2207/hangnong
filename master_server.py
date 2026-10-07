@@ -1448,8 +1448,8 @@ def junk_account_reason(account: ParsedAccount) -> str | None:
         return "Placeholder/trạng thái hệ thống, không phải thông tin đăng nhập thực"
     if password_folded in PROTOCOL_PLACEHOLDERS or password_folded.startswith(("http://", "https://")):
         return "Password là giao thức hoặc URL chuyển hướng"
-    if DOMAIN_PATTERN.fullmatch(username) or DOMAIN_PATTERN.fullmatch(password):
-        return "Username/password là domain hoặc endpoint web"
+    if DOMAIN_PATTERN.fullmatch(username):
+        return "Username là domain hoặc endpoint web"
     if re.search(r"\.(?:html?|php\d?|aspx?|jsp)$", username, re.IGNORECASE):
         return "Username là tên file/endpoint web"
     if username_folded in {"direct", "redirect", "callback"} and password_folded in {

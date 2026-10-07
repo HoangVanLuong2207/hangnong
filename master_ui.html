@@ -2387,7 +2387,7 @@ function analyzeAccountsInput(text) {
     const passLower = password.toLowerCase();
     if (placeholders.has(marker(username)) || placeholders.has(marker(password))) return true;
     if (protocols.has(passLower) || passLower.startsWith('http://') || passLower.startsWith('https://')) return true;
-    if (domainPattern.test(username) || domainPattern.test(password)) return true;
+    if (domainPattern.test(username)) return true;
     if (/\.(?:html?|php\d?|aspx?|jsp)$/i.test(username)) return true;
     if (['direct', 'redirect', 'callback'].includes(userLower) && ['link', 'url', 'callback', 'redirect'].includes(passLower)) return true;
     if (/^Google_\[Chrome\]_Profile\d*$/i.test(password)) return true;

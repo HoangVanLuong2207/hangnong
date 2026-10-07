@@ -116,7 +116,7 @@ class ParseAccountsValidationTest(unittest.TestCase):
     def test_junk_rules_cover_placeholders_urls_tokens_profiles_and_weak_passwords(self) -> None:
         accounts = master_server.parse_accounts("\n".join((
             "wirawan0799|UNKNOWN",
-            "Jeen.123|sso.garena.com",
+            "maps.google.com|Secure123!",
             "profile01|Google_[Chrome]_Profile4",
             "tokenusr|c2b598c2-f0b7-4f45-9cab-ed5c19ed9177",
             "shortusr|234",
@@ -150,8 +150,11 @@ class ParseAccountsValidationTest(unittest.TestCase):
         self.assertIsNone(master_server.junk_account_reason(
             master_server.ParsedAccount("single.com", "Secure123!"),
         ))
-        self.assertIn("domain", master_server.junk_account_reason(
+        self.assertIsNone(master_server.junk_account_reason(
             master_server.ParsedAccount("gooduser", "sso.garena.com"),
+        ))
+        self.assertIn("domain", master_server.junk_account_reason(
+            master_server.ParsedAccount("maps.google.com", "Secure123!"),
         ) or "")
         self.assertIn("ký tự đặc biệt", master_server.junk_account_reason(
             master_server.ParsedAccount("nospecial", "Secure123"),
