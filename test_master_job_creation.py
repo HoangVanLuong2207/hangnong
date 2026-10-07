@@ -144,6 +144,15 @@ class ParseAccountsValidationTest(unittest.TestCase):
         self.assertIsNone(master_server.junk_account_reason(
             master_server.ParsedAccount("gooduser", "Secure123!"),
         ))
+        self.assertIsNone(master_server.junk_account_reason(
+            master_server.ParsedAccount("dotpass1", "Secure.xyz"),
+        ))
+        self.assertIsNone(master_server.junk_account_reason(
+            master_server.ParsedAccount("single.com", "Secure123!"),
+        ))
+        self.assertIn("domain", master_server.junk_account_reason(
+            master_server.ParsedAccount("gooduser", "sso.garena.com"),
+        ) or "")
         self.assertIn("ký tự đặc biệt", master_server.junk_account_reason(
             master_server.ParsedAccount("nospecial", "Secure123"),
         ) or "")
