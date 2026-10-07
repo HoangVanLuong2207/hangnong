@@ -1426,6 +1426,9 @@ SYSTEM_PLACEHOLDERS = {
     "fail", "failed", "decryption", "decrypt", "decryptionfailed",
 }
 PROTOCOL_PLACEHOLDERS = {"http", "https", "ttp", "ttps", "ftp", "sso"}
+PASSWORD_SPECIAL_CHARACTERS = frozenset(
+    "!@#$%^&*()_+-=[]{};,.?/\\~`'\"<>"
+)
 
 
 def _normalized_marker(value: str) -> str:
@@ -1471,6 +1474,8 @@ def junk_account_reason(account: ParsedAccount) -> str | None:
         return "Mật khẩu ngắn hơn 6 ký tự"
     if password_folded == username_folded or password_folded.rstrip(".") == username_folded:
         return "Username và password giống nhau"
+    if not any(char in PASSWORD_SPECIAL_CHARACTERS for char in password):
+        return "Mật khẩu phải chứa ít nhất một ký tự đặc biệt (không dùng dấu : hoặc |)"
     return None
 
 
