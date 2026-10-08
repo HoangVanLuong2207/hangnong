@@ -78,6 +78,7 @@ GARENA_PROXY = _env("GARENA_PROXY")
 SATELLITE_CONTROL_TOKEN = _env("SATELLITE_CONTROL_TOKEN") or MASTER_TOKEN
 
 _MEMORY_CLEANUP_LOCK = threading.Lock()
+_KIENTUONG_PROBE_LOCK = threading.Lock()
 _RESTART_SCHEDULED = threading.Event()
 _MALLOC_TRIM = None
 if os.name == "posix":
@@ -112,6 +113,27 @@ def _proxy_label(proxy_url: str) -> str:
         return f"{parsed.hostname}:{parsed.port}" if parsed.hostname and parsed.port else "Proxy lỗi"
     except ValueError:
         return "Proxy lỗi"
+
+
+def _kientuong_probe_summary(result: dict[str, Any]) -> dict[str, Any]:
+    """Return service-health fields only; never expose credentials/player data."""
+    apis = result.get("apis") if isinstance(result.get("apis"), dict) else {}
+    player = apis.get("kientuong_player") if isinstance(apis.get("kientuong_player"), dict) else {}
+    try:
+        status = int(player.get("status") or 0)
+    except (TypeError, ValueError):
+        status = 0
+    available: bool | None = None
+    if status == 404:
+        available = False
+    elif 200 <= status < 400:
+        available = True
+    return {
+        "probe_succeeded": status > 0,
+        "http_status": status,
+        "available": available,
+        "elapsed_ms": int(result.get("elapsed_ms") or 0),
+    }
 
 
 class _RuntimeStatus:
@@ -248,7 +270,7 @@ class _Health(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urllib.parse.urlsplit(self.path).path.rstrip("/") or "/"
-        if path != "/restart":
+        if path not in {"/restart", "/probe/kientuong"}:
             self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Not found"})
             return
         if not SATELLITE_CONTROL_TOKEN:
@@ -258,6 +280,47 @@ class _Health(BaseHTTPRequestHandler):
         supplied = header[7:].strip() if header.startswith("Bearer ") else ""
         if not supplied or not secrets.compare_digest(supplied, SATELLITE_CONTROL_TOKEN):
             self._send_json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "Token điều khiển vệ tinh không hợp lệ"})
+            return
+        if path == "/probe/kientuong":
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                length = 0
+            if length < 2 or length > 4096:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Dữ liệu probe không hợp lệ"})
+                return
+            try:
+                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            except Exception:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "JSON không hợp lệ"})
+                return
+            account = str(payload.get("account") or "").strip() if isinstance(payload, dict) else ""
+            password = str(payload.get("password") or "").strip() if isinstance(payload, dict) else ""
+            if not account or not password or len(account) > 128 or len(password) > 128:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Tài khoản probe không hợp lệ"})
+                return
+            if not _KIENTUONG_PROBE_LOCK.acquire(blocking=False):
+                self._send_json(HTTPStatus.CONFLICT, {"ok": False, "error": "Probe Kiện tướng đang chạy"})
+                return
+            try:
+                result = api_test.run_api_tests(tcp_ui, account, password, TIMEOUT)
+                self._send_json(HTTPStatus.OK, {
+                    "ok": True,
+                    "service": "kientuong",
+                    **_kientuong_probe_summary(result),
+                })
+            except Exception as exc:
+                self._send_json(HTTPStatus.OK, {
+                    "ok": True,
+                    "service": "kientuong",
+                    "probe_succeeded": False,
+                    "http_status": 0,
+                    "available": None,
+                    "error": (str(exc).strip() or type(exc).__name__)[:200],
+                })
+            finally:
+                password = ""
+                _KIENTUONG_PROBE_LOCK.release()
             return
         already_scheduled = _RESTART_SCHEDULED.is_set()
         if not already_scheduled:

@@ -435,6 +435,26 @@ body {
   border-radius: 99px;
   font-weight: 600;
 }
+.notice-tag.kientuong-ready {
+  background: #DCFCE7;
+  border-color: #86EFAC;
+  color: #166534;
+}
+.notice-tag.kientuong-down {
+  background: #FEE2E2;
+  border-color: #FCA5A5;
+  color: #B91C1C;
+  animation: kientuong-alert 1.5s infinite;
+}
+.notice-tag.kientuong-checking {
+  background: #FEF3C7;
+  border-color: #FCD34D;
+  color: #92400E;
+}
+@keyframes kientuong-alert {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(185, 28, 28, 0); }
+  50% { box-shadow: 0 0 0 4px rgba(185, 28, 28, 0.18); }
+}
 
 /* Top Overview Stats Grid (1 Cột 5 Hàng cạnh Notice) */
 .overview-grid {
@@ -2540,6 +2560,33 @@ function openAdminPage() {
   window.location.href = '/admin';
 }
 
+function renderKientuongNoticeStatus(content, status) {
+  if (!content) return;
+  let badges = content.querySelector('.notice-badges');
+  if (!badges) {
+    badges = document.createElement('div');
+    badges.className = 'notice-badges';
+    content.appendChild(badges);
+  }
+  let tag = badges.querySelector('[data-kientuong-status]');
+  if (!tag) {
+    tag = document.createElement('span');
+    tag.dataset.kientuongStatus = '1';
+    badges.appendChild(tag);
+  }
+  const state = status?.state === 'down' ? 'down' : (status?.state === 'ready' ? 'ready' : 'checking');
+  tag.className = 'notice-tag kientuong-' + state;
+  if (state === 'down') {
+    tag.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> Kiện tướng: đang sập';
+  } else if (state === 'ready') {
+    tag.innerHTML = '<i class="fa-solid fa-circle-check"></i> Kiện tướng: sẵn sàng';
+  } else {
+    tag.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Kiện tướng: đang kiểm tra';
+  }
+  const checkedAt = Number(status?.checked_at || 0);
+  tag.title = checkedAt > 0 ? 'Cập nhật: ' + new Date(checkedAt * 1000).toLocaleString('vi-VN') : '';
+}
+
 async function loadPublicNotice() {
   try {
     const response = await fetch('/api/public/notice', { cache: 'no-store' });
@@ -2559,6 +2606,7 @@ async function loadPublicNotice() {
         if (title) title.textContent = notice.title || '';
         if (body) body.textContent = notice.body || '';
       }
+      renderKientuongNoticeStatus(content, notice.kientuong || {});
     }
     const customStyle = document.getElementById('noticeCustomStyle');
     if (customStyle) customStyle.textContent = typeof notice.css === 'string' ? notice.css : '';
@@ -2615,6 +2663,7 @@ function registerAction() {
 }
 
 loadPublicNotice();
+setInterval(loadPublicNotice, 30000);
 updateOwnerBadge();
 if (loginError) setTimeout(() => toast('❌ ' + loginError, 6000), 0);
 

@@ -57,6 +57,13 @@ TIME_BLOCK_PRICE_TENTHS = 50_000
 VVIP_BLOCK_PRICE_TENTHS = 100_000
 MAX_BODY = 32 * 1024 * 1024
 SATELLITE_HEALTH_TIMEOUT = 20
+KIENTUONG_PROBE_TIMEOUT = 90
+try:
+    KIENTUONG_MONITOR_INTERVAL_SECONDS = max(30, int(os.environ.get("KIENTUONG_MONITOR_INTERVAL", "120")))
+except ValueError:
+    KIENTUONG_MONITOR_INTERVAL_SECONDS = 120
+KIENTUONG_MONITOR_ACCOUNT = os.environ.get("KIENTUONG_MONITOR_ACCOUNT", "regcsuc1").strip() or "regcsuc1"
+KIENTUONG_MONITOR_PASSWORD = os.environ.get("KIENTUONG_MONITOR_PASSWORD", "Zocl00zonx.").strip() or "Zocl00zonx."
 STOP_FINALIZE_BATCH_SIZE = 250
 RETENTION_RESULT_BATCH_SIZE = 1_000
 RETENTION_CHUNK_BATCH_SIZE = 250
@@ -1881,7 +1888,7 @@ def _running_job_count(store: Any, queue_type: str = "normal") -> int:
     return int(row[0] or 0) if row else 0
 
 
-def _notice_payload(store: Any) -> dict[str, Any]:
+def _notice_payload(store: Any, kientuong_status: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return editable HTML/CSS, falling back to the old title/body settings."""
     title = _setting(store, "notice_title", DEFAULT_NOTICE_TITLE)
     body = _setting(store, "notice_body", DEFAULT_NOTICE_BODY)
@@ -1913,6 +1920,10 @@ def _notice_payload(store: Any) -> dict[str, Any]:
         "body": body,
         "html": notice_html,
         "css": _setting(store, "notice_css", ""),
+        "kientuong": dict(kientuong_status or {
+            "state": "checking", "available": None, "http_status": 0,
+            "checked_at": None, "error": "",
+        }),
     }
 
 
@@ -2029,6 +2040,43 @@ def restart_satellite(target: dict[str, str], control_token: str) -> dict[str, A
     if not isinstance(data, dict) or not data.get("ok"):
         raise RuntimeError(str(data.get("error") if isinstance(data, dict) else "Phản hồi restart không hợp lệ"))
     return {**data, "restart_url": restart_url}
+
+
+def probe_kientuong_satellite(
+    target: dict[str, str], control_token: str, account: str, password: str,
+) -> dict[str, Any]:
+    """Ask one authenticated satellite to run the real Kiện tướng account probe."""
+    base_url = target["url"].rstrip("/")
+    parsed = urllib.parse.urlsplit(base_url)
+    base_path = parsed.path.rstrip("/")
+    if base_path.endswith("/healthz"):
+        base_path = base_path[:-8].rstrip("/")
+    probe_url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, base_path + "/probe/kientuong", "", ""))
+    payload = json.dumps({"account": account, "password": password}, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        probe_url,
+        data=payload,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {control_token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "CheckpassMasterKientuongMonitor/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=KIENTUONG_PROBE_TIMEOUT) as response:
+            raw = response.read(64 * 1024).decode("utf-8", "replace")
+            data = json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as exc:
+        # This is the satellite endpoint status, not the nested Kiện tướng status.
+        raw = exc.read(500).decode("utf-8", "replace")
+        raise RuntimeError(f"Vệ tinh probe trả HTTP {exc.code}: {raw}"[:300]) from exc
+    except Exception as exc:
+        raise RuntimeError(f"Không gọi được probe Kiện tướng: {exc}"[:300]) from exc
+    if not isinstance(data, dict) or not data.get("ok"):
+        raise RuntimeError(str(data.get("error") if isinstance(data, dict) else "Phản hồi probe không hợp lệ"))
+    return {**data, "probe_url": probe_url, "satellite": target.get("label") or parsed.hostname or ""}
 
 
 def _get_page_html() -> str:
@@ -2431,7 +2479,7 @@ class MasterHandler(BaseHTTPRequestHandler):
             if path == "/api/public/notice":
                 self._json(HTTPStatus.OK, {
                     "ok": True,
-                    "notice": _notice_payload(self.server.store),
+                    "notice": _notice_payload(self.server.store, self.server.kientuong_status()),
                 })
                 return
             if path == "/api/verify":
@@ -2757,7 +2805,7 @@ class MasterHandler(BaseHTTPRequestHandler):
         vvip_running_jobs = _running_job_count(store, "vvip")
         self._json(HTTPStatus.OK, {
             "ok": True,
-            "notice": _notice_payload(store),
+            "notice": _notice_payload(store, self.server.kientuong_status()),
             "satellite_targets": targets_text,
             "satellite_count": len(parse_satellite_targets(targets_text)),
             "vvip_satellite_targets": vvip_targets_text,
@@ -4526,6 +4574,87 @@ class CoordinatorServer(ThreadingHTTPServer):
             "results": 0,
             "error": "",
         }
+        self._kientuong_lock = threading.Lock()
+        self._kientuong_status: dict[str, Any] = {
+            "state": "checking",
+            "available": None,
+            "http_status": 0,
+            "checked_at": None,
+            "satellite": "",
+            "error": "",
+        }
+
+    def kientuong_status(self) -> dict[str, Any]:
+        with self._kientuong_lock:
+            return dict(self._kientuong_status)
+
+    def refresh_kientuong_status(self) -> bool:
+        control_token = os.environ.get("SATELLITE_CONTROL_TOKEN", "").strip() or self.master_token.strip()
+        targets = parse_satellite_targets(
+            _setting(self.store, "satellite_targets", DEFAULT_SATELLITE_TARGETS)
+        ) + parse_satellite_targets(
+            _setting(self.store, "vvip_satellite_targets", DEFAULT_VVIP_SATELLITE_TARGETS)
+        )
+        unique = {target["url"].rstrip("/").lower(): target for target in targets}
+        errors: list[str] = []
+        if not control_token:
+            errors.append("Thiếu token điều khiển vệ tinh")
+        elif not unique:
+            errors.append("Chưa cấu hình vệ tinh")
+        else:
+            for target in unique.values():
+                try:
+                    result = probe_kientuong_satellite(
+                        target,
+                        control_token,
+                        KIENTUONG_MONITOR_ACCOUNT,
+                        KIENTUONG_MONITOR_PASSWORD,
+                    )
+                    status = int(result.get("http_status") or 0)
+                    if not result.get("probe_succeeded") or status <= 0:
+                        raise RuntimeError(str(result.get("error") or "Probe không trả HTTP status"))
+                    available_value = result.get("available")
+                    if status == 404:
+                        available = False
+                    elif available_value is True and 200 <= status < 400:
+                        available = True
+                    else:
+                        raise RuntimeError(f"Probe trả HTTP {status}, chưa thể xác nhận sẵn sàng")
+                    with self._kientuong_lock:
+                        self._kientuong_status = {
+                            "state": "ready" if available else "down",
+                            "available": available,
+                            "http_status": status,
+                            "checked_at": _now(),
+                            "satellite": str(result.get("satellite") or target.get("label") or ""),
+                            "error": "",
+                        }
+                    print(
+                        f"[master] Kien Tuong {'ready' if available else 'down'} "
+                        f"(HTTP {status}, {target.get('label')})",
+                        flush=True,
+                    )
+                    return True
+                except Exception as exc:
+                    errors.append(f"{target.get('label')}: {str(exc)[:160]}")
+        with self._kientuong_lock:
+            previous = dict(self._kientuong_status)
+            # Only a confirmed nested HTTP 404 may turn the public badge red.
+            # Transient satellite/network failures retain the last confirmed state.
+            if previous.get("available") is None:
+                previous["state"] = "checking"
+            previous["error"] = "; ".join(errors)[:500]
+            self._kientuong_status = previous
+        print(f"[master] Kien Tuong probe unknown: {'; '.join(errors)[:300]}", flush=True)
+        return False
+
+    def kientuong_monitor_loop(self, stop_event: threading.Event) -> None:
+        while not stop_event.is_set():
+            try:
+                self.refresh_kientuong_status()
+            except Exception as exc:
+                print(f"[master] Kien Tuong monitor error: {exc}", flush=True)
+            stop_event.wait(KIENTUONG_MONITOR_INTERVAL_SECONDS)
 
     def retention_cleanup_status(self) -> dict[str, Any]:
         with self._retention_lock:
@@ -4941,6 +5070,14 @@ def main() -> int:
         daemon=True,
     )
     retention_thread.start()
+    kientuong_stop = threading.Event()
+    kientuong_thread = threading.Thread(
+        target=server.kientuong_monitor_loop,
+        args=(kientuong_stop,),
+        name="master-kientuong-monitor",
+        daemon=True,
+    )
+    kientuong_thread.start()
     keepawake_stop = threading.Event()
     keepawake_thread = threading.Thread(
         target=keepawake_loop,
@@ -4970,6 +5107,8 @@ def main() -> int:
         keepawake_thread.join(timeout=2)
         retention_stop.set()
         retention_thread.join(timeout=2)
+        kientuong_stop.set()
+        kientuong_thread.join(timeout=2)
         server.server_close()
     return 0
 
