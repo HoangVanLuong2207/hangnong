@@ -615,6 +615,34 @@ body {
   margin-bottom: 12px;
   position: relative;
 }
+.jobs-status-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: -2px 0 12px;
+  flex-wrap: wrap;
+}
+.jobs-status-filter button {
+  padding: 5px 12px;
+  border-radius: 99px;
+  font-size: 11.5px;
+  font-weight: 600;
+  background: #FFFFFF;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.jobs-status-filter button:hover {
+  color: var(--text);
+  border-color: var(--border-light);
+}
+.jobs-status-filter button.active {
+  background: var(--secondary);
+  border-color: var(--secondary);
+  color: #FFFFFF;
+  box-shadow: 0 2px 8px rgba(234, 88, 12, 0.25);
+}
 .jobs-search-input {
   width: 100%;
   padding: 8px 12px 8px 34px;
@@ -1743,6 +1771,12 @@ table.data-table tbody tr:hover {
         <input type="text" id="jobsSearchInput" class="jobs-search-input" placeholder="Tìm theo Job ID hoặc tài khoản..." oninput="filterJobsList()">
       </div>
 
+      <div class="jobs-status-filter" id="jobsStatusFilter" aria-label="Lọc job theo trạng thái">
+        <button type="button" class="active" data-status="all" onclick="setJobsStatusFilter('all')">Tất cả</button>
+        <button type="button" data-status="running" onclick="setJobsStatusFilter('running')"><i class="fa-solid fa-bolt"></i> Đang chạy</button>
+        <button type="button" data-status="done" onclick="setJobsStatusFilter('done')"><i class="fa-solid fa-check"></i> Hoàn thành</button>
+      </div>
+
       <div id="jobsList" class="jobs-list">
         <div class="empty-state"><i class="fa-solid fa-circle-notch fa-spin-fast"></i><br>Đang kết nối và tải danh sách jobs...</div>
       </div>
@@ -2109,6 +2143,7 @@ const DETAIL_TRANSITION_MS = 300;
 const JOBS_EXPAND_MS = 480;
 let jobsCache = [];
 let jobsLoading = false;
+let jobsStatusFilter = 'all';
 let isAdminKey = false;
 let canCreateJobs = false;
 let maxAccountsPerJob = null;
@@ -2939,15 +2974,27 @@ function updateOverviewStats(jobs, overview) {
 }
 
 function filterJobsList() {
-  const q = (document.getElementById('jobsSearchInput')?.value || '').trim().toLowerCase();
-  renderJobs(q);
+  renderJobs();
 }
 
-function renderJobs(query = '') {
+function setJobsStatusFilter(status) {
+  jobsStatusFilter = status;
+  document.querySelectorAll('#jobsStatusFilter button').forEach(button => {
+    button.classList.toggle('active', button.dataset.status === status);
+  });
+  renderJobs();
+}
+
+function renderJobs() {
   const el = document.getElementById('jobsList');
-  let filtered = jobsCache;
+  const query = (document.getElementById('jobsSearchInput')?.value || '').trim().toLowerCase();
+  let filtered = jobsCache.filter(j => {
+    if (jobsStatusFilter === 'done') return j.status === 'done';
+    if (jobsStatusFilter === 'running') return j.status !== 'done';
+    return true;
+  });
   if (query) {
-    filtered = jobsCache.filter(j => {
+    filtered = filtered.filter(j => {
       const idStr = String(j.id);
       const ownerStr = String(j.owner_preview || '').toLowerCase();
       return idStr.includes(query) || ownerStr.includes(query);
@@ -2955,7 +3002,8 @@ function renderJobs(query = '') {
   }
 
   if (!filtered.length) {
-    el.innerHTML = '<div class="empty-state"><i class="fa-solid fa-box-open"></i><br>' + (query ? 'Không tìm thấy job phù hợp' : 'Chưa có job nào trong hệ thống') + '</div>';
+    const hasFilter = query || jobsStatusFilter !== 'all';
+    el.innerHTML = '<div class="empty-state"><i class="fa-solid fa-box-open"></i><br>' + (hasFilter ? 'Không tìm thấy job phù hợp' : 'Chưa có job nào trong hệ thống') + '</div>';
     return;
   }
 
@@ -3022,8 +3070,7 @@ async function loadJobs() {
     if (!d.ok) throw new Error(d.error || 'Không tải được danh sách jobs');
     jobsCache = Array.isArray(d.jobs) ? d.jobs : [];
     updateOverviewStats(jobsCache, d.overview);
-    const q = (document.getElementById('jobsSearchInput')?.value || '').trim().toLowerCase();
-    renderJobs(q);
+    renderJobs();
   } catch(e) {
     if (!jobsCache.length) {
       document.getElementById('jobsList').innerHTML = '<div class="empty-state"><i class="fa-solid fa-circle-exclamation" style="color:var(--danger)"></i><br>Lỗi: ' + esc(e.message) + '</div>';
