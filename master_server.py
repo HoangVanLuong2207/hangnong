@@ -36,6 +36,8 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 from satellite_keepawake import keepawake_loop
+import garena_api_test_chrome1 as kientuong_api_test
+import garena_tcp_login_chrome as kientuong_tcp_ui
 
 DEFAULT_CHUNK_LIMIT = 15
 # Chunk được cố định để tránh client thay đổi kích thước qua API.
@@ -57,7 +59,7 @@ TIME_BLOCK_PRICE_TENTHS = 50_000
 VVIP_BLOCK_PRICE_TENTHS = 100_000
 MAX_BODY = 32 * 1024 * 1024
 SATELLITE_HEALTH_TIMEOUT = 20
-KIENTUONG_PROBE_TIMEOUT = 90
+KIENTUONG_REQUEST_TIMEOUT = 20.0
 try:
     KIENTUONG_MONITOR_INTERVAL_SECONDS = max(30, int(os.environ.get("KIENTUONG_MONITOR_INTERVAL", "120")))
 except ValueError:
@@ -85,6 +87,8 @@ MASTER_TIMEZONE = os.environ.get("MASTER_TIMEZONE", "Asia/Ho_Chi_Minh").strip() 
 # Cache license: key -> (ok, expiry, info)
 _LICENSE_CACHE: dict[str, tuple[bool, float, dict[str, Any]]] = {}
 _LICENSE_CACHE_LOCK = threading.RLock()
+_KIENTUONG_TCP_MODULE: Any = None
+_KIENTUONG_TCP_MODULE_LOCK = threading.Lock()
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -2042,41 +2046,41 @@ def restart_satellite(target: dict[str, str], control_token: str) -> dict[str, A
     return {**data, "restart_url": restart_url}
 
 
-def probe_kientuong_satellite(
-    target: dict[str, str], control_token: str, account: str, password: str,
-) -> dict[str, Any]:
-    """Ask one authenticated satellite to run the real Kiện tướng account probe."""
-    base_url = target["url"].rstrip("/")
-    parsed = urllib.parse.urlsplit(base_url)
-    base_path = parsed.path.rstrip("/")
-    if base_path.endswith("/healthz"):
-        base_path = base_path[:-8].rstrip("/")
-    probe_url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, base_path + "/probe/kientuong", "", ""))
-    payload = json.dumps({"account": account, "password": password}, ensure_ascii=False).encode("utf-8")
-    request = urllib.request.Request(
-        probe_url,
-        data=payload,
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {control_token}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "User-Agent": "CheckpassMasterKientuongMonitor/1.0",
-        },
-    )
+def _kientuong_probe_summary(result: dict[str, Any]) -> dict[str, Any]:
+    """Extract only service-health fields from the direct master probe."""
+    apis = result.get("apis") if isinstance(result.get("apis"), dict) else {}
+    player = apis.get("kientuong_player") if isinstance(apis.get("kientuong_player"), dict) else {}
     try:
-        with urllib.request.urlopen(request, timeout=KIENTUONG_PROBE_TIMEOUT) as response:
-            raw = response.read(64 * 1024).decode("utf-8", "replace")
-            data = json.loads(raw) if raw else {}
-    except urllib.error.HTTPError as exc:
-        # This is the satellite endpoint status, not the nested Kiện tướng status.
-        raw = exc.read(500).decode("utf-8", "replace")
-        raise RuntimeError(f"Vệ tinh probe trả HTTP {exc.code}: {raw}"[:300]) from exc
-    except Exception as exc:
-        raise RuntimeError(f"Không gọi được probe Kiện tướng: {exc}"[:300]) from exc
-    if not isinstance(data, dict) or not data.get("ok"):
-        raise RuntimeError(str(data.get("error") if isinstance(data, dict) else "Phản hồi probe không hợp lệ"))
-    return {**data, "probe_url": probe_url, "satellite": target.get("label") or parsed.hostname or ""}
+        status = int(player.get("status") or 0)
+    except (TypeError, ValueError):
+        status = 0
+    available: bool | None = None
+    if status == 404:
+        available = False
+    elif 200 <= status < 400:
+        available = True
+    return {
+        "probe_succeeded": status > 0,
+        "http_status": status,
+        "available": available,
+        "elapsed_ms": int(result.get("elapsed_ms") or 0),
+    }
+
+
+def run_kientuong_probe(account: str, password: str) -> dict[str, Any]:
+    """Run the authenticated Kiện Tướng check inside the master process."""
+    global _KIENTUONG_TCP_MODULE
+    with _KIENTUONG_TCP_MODULE_LOCK:
+        if _KIENTUONG_TCP_MODULE is None:
+            _KIENTUONG_TCP_MODULE = kientuong_tcp_ui.load_verified_tcp_module()
+        tcp_module = _KIENTUONG_TCP_MODULE
+    result = kientuong_api_test.run_api_tests(
+        tcp_module,
+        account,
+        password,
+        KIENTUONG_REQUEST_TIMEOUT,
+    )
+    return _kientuong_probe_summary(result)
 
 
 def _get_page_html() -> str:
@@ -4589,54 +4593,38 @@ class CoordinatorServer(ThreadingHTTPServer):
             return dict(self._kientuong_status)
 
     def refresh_kientuong_status(self) -> bool:
-        control_token = os.environ.get("SATELLITE_CONTROL_TOKEN", "").strip() or self.master_token.strip()
-        targets = parse_satellite_targets(
-            _setting(self.store, "satellite_targets", DEFAULT_SATELLITE_TARGETS)
-        ) + parse_satellite_targets(
-            _setting(self.store, "vvip_satellite_targets", DEFAULT_VVIP_SATELLITE_TARGETS)
-        )
-        unique = {target["url"].rstrip("/").lower(): target for target in targets}
         errors: list[str] = []
-        if not control_token:
-            errors.append("Thiếu token điều khiển vệ tinh")
-        elif not unique:
-            errors.append("Chưa cấu hình vệ tinh")
-        else:
-            for target in unique.values():
-                try:
-                    result = probe_kientuong_satellite(
-                        target,
-                        control_token,
-                        KIENTUONG_MONITOR_ACCOUNT,
-                        KIENTUONG_MONITOR_PASSWORD,
-                    )
-                    status = int(result.get("http_status") or 0)
-                    if not result.get("probe_succeeded") or status <= 0:
-                        raise RuntimeError(str(result.get("error") or "Probe không trả HTTP status"))
-                    available_value = result.get("available")
-                    if status == 404:
-                        available = False
-                    elif available_value is True and 200 <= status < 400:
-                        available = True
-                    else:
-                        raise RuntimeError(f"Probe trả HTTP {status}, chưa thể xác nhận sẵn sàng")
-                    with self._kientuong_lock:
-                        self._kientuong_status = {
-                            "state": "ready" if available else "down",
-                            "available": available,
-                            "http_status": status,
-                            "checked_at": _now(),
-                            "satellite": str(result.get("satellite") or target.get("label") or ""),
-                            "error": "",
-                        }
-                    print(
-                        f"[master] Kien Tuong {'ready' if available else 'down'} "
-                        f"(HTTP {status}, {target.get('label')})",
-                        flush=True,
-                    )
-                    return True
-                except Exception as exc:
-                    errors.append(f"{target.get('label')}: {str(exc)[:160]}")
+        try:
+            result = run_kientuong_probe(
+                KIENTUONG_MONITOR_ACCOUNT,
+                KIENTUONG_MONITOR_PASSWORD,
+            )
+            status = int(result.get("http_status") or 0)
+            if not result.get("probe_succeeded") or status <= 0:
+                raise RuntimeError(str(result.get("error") or "Probe không trả HTTP status"))
+            available_value = result.get("available")
+            if status == 404:
+                available = False
+            elif available_value is True and 200 <= status < 400:
+                available = True
+            else:
+                raise RuntimeError(f"Probe trả HTTP {status}, chưa thể xác nhận sẵn sàng")
+            with self._kientuong_lock:
+                self._kientuong_status = {
+                    "state": "ready" if available else "down",
+                    "available": available,
+                    "http_status": status,
+                    "checked_at": _now(),
+                    "satellite": "master",
+                    "error": "",
+                }
+            print(
+                f"[master] Kien Tuong {'ready' if available else 'down'} (HTTP {status})",
+                flush=True,
+            )
+            return True
+        except Exception as exc:
+            errors.append(str(exc)[:300])
         with self._kientuong_lock:
             previous = dict(self._kientuong_status)
             # Only a confirmed nested HTTP 404 may turn the public badge red.

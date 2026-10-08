@@ -78,12 +78,10 @@ class SatelliteIdleRestartTest(unittest.TestCase):
         self.restart.assert_not_called()
 
     def test_kientuong_404_marks_service_down(self):
-        with mock.patch.object(master, "probe_kientuong_satellite", return_value={
-            "ok": True,
+        with mock.patch.object(master, "run_kientuong_probe", return_value={
             "probe_succeeded": True,
             "http_status": 404,
             "available": False,
-            "satellite": "normal.example",
         }) as probe:
             self.assertTrue(self.server.refresh_kientuong_status())
 
@@ -91,15 +89,14 @@ class SatelliteIdleRestartTest(unittest.TestCase):
         self.assertEqual(status["state"], "down")
         self.assertFalse(status["available"])
         self.assertEqual(status["http_status"], 404)
-        self.assertEqual(probe.call_args.args[2:], ("regcsuc1", "Zocl00zonx."))
+        self.assertEqual(probe.call_args.args, ("regcsuc1", "Zocl00zonx."))
+        self.assertEqual(status["satellite"], "master")
 
     def test_kientuong_normal_response_marks_service_ready(self):
-        with mock.patch.object(master, "probe_kientuong_satellite", return_value={
-            "ok": True,
+        with mock.patch.object(master, "run_kientuong_probe", return_value={
             "probe_succeeded": True,
             "http_status": 200,
             "available": True,
-            "satellite": "normal.example",
         }):
             self.assertTrue(self.server.refresh_kientuong_status())
 
@@ -109,17 +106,15 @@ class SatelliteIdleRestartTest(unittest.TestCase):
         self.assertEqual(status["http_status"], 200)
 
     def test_probe_failure_keeps_last_confirmed_state(self):
-        with mock.patch.object(master, "probe_kientuong_satellite", return_value={
-            "ok": True,
+        with mock.patch.object(master, "run_kientuong_probe", return_value={
             "probe_succeeded": True,
             "http_status": 200,
             "available": True,
-            "satellite": "normal.example",
         }):
             self.assertTrue(self.server.refresh_kientuong_status())
 
         with mock.patch.object(
-            master, "probe_kientuong_satellite", side_effect=RuntimeError("temporary offline")
+            master, "run_kientuong_probe", side_effect=RuntimeError("temporary offline")
         ):
             self.assertFalse(self.server.refresh_kientuong_status())
 
