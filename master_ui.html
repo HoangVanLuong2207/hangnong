@@ -1816,10 +1816,11 @@ table.data-table tbody tr:hover {
       <div style="margin-bottom:14px">
         <label class="form-label" for="depositAmountInput">Số tiền muốn nạp (VNĐ)</label>
         <div style="position:relative">
-          <input id="depositAmountInput" class="form-input" type="number" min="10000" step="5000" value="20000" placeholder="Tối thiểu 10.000đ" style="font-size:16px;font-weight:600;padding-right:40px">
+          <input id="depositAmountInput" class="form-input" type="number" min="10000" step="5000" value="20000" placeholder="Tối thiểu 10.000đ" oninput="updateDepositPromotionEstimate()" style="font-size:16px;font-weight:600;padding-right:40px">
           <span style="position:absolute;right:12px;top:50%;transform:translateY(-50%);font-weight:600;color:var(--text-muted)">đ</span>
         </div>
         <small id="depositMinNotice" style="color:var(--text-muted);display:block;margin-top:4px">Tối thiểu: 10.000đ</small>
+        <div id="depositPromotionNotice" style="display:none;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:9px 10px;margin-top:9px;color:#9a3412;font-size:12px;line-height:1.45"></div>
       </div>
 
       <div style="display:grid;grid-template-columns:repeat(3, 1fr);gap:8px;margin-bottom:16px">
@@ -1866,6 +1867,10 @@ table.data-table tbody tr:hover {
         <div style="display:flex;justify-content:space-between;margin-bottom:4px">
           <span style="color:var(--text-muted)">Số tiền:</span>
           <strong id="depositDisplayAmount" style="color:var(--secondary)"></strong>
+        </div>
+        <div id="depositBonusRow" style="display:none;justify-content:space-between;margin-bottom:4px">
+          <span style="color:var(--text-muted)">Thưởng Checkpass:</span>
+          <strong id="depositBonusAmount" style="color:#16a34a"></strong>
         </div>
         <div style="display:flex;justify-content:space-between;align-items:center;background:#fef3c7;padding:6px 8px;border-radius:6px;border:1px solid #fde68a;margin-top:6px">
           <span style="color:#92400e;font-size:12px;font-weight:600">Nội dung CK:</span>
@@ -2125,6 +2130,8 @@ function closeModal(id) {
 // --- Direct In-App Deposit Flow ---
 let depositPollTimer = null;
 let currentDepositRef = null;
+let depositMinimumAmount = 10000;
+let depositPromotion = { enabled: false, minimum_amount: 0, bonus_percent: 0 };
 
 async function openDepositModal() {
   if (!currentSession && !TOKEN) {
@@ -2149,8 +2156,11 @@ async function openDepositModal() {
       const notice = document.getElementById('depositMinNotice');
       if (notice) notice.textContent = 'Tối thiểu: ' + minFormatted + 'đ';
       const input = document.getElementById('depositAmountInput');
-      if (input) input.min = res.minimum_deposit_amount;
+      depositMinimumAmount = Number(res.minimum_deposit_amount);
+      if (input) input.min = depositMinimumAmount;
     }
+    depositPromotion = res.checkpass_deposit_promotion || depositPromotion;
+    updateDepositPromotionEstimate();
   } catch (_) {}
 }
 
@@ -2166,6 +2176,25 @@ function closeDepositModal() {
 function setDepositAmount(amount) {
   const input = document.getElementById('depositAmountInput');
   if (input) input.value = amount;
+  updateDepositPromotionEstimate();
+}
+
+function updateDepositPromotionEstimate() {
+  const box = document.getElementById('depositPromotionNotice');
+  if (!box) return;
+  if (!depositPromotion.enabled || Number(depositPromotion.bonus_percent || 0) <= 0) {
+    box.style.display = 'none';
+    return;
+  }
+  const amount = Number(document.getElementById('depositAmountInput')?.value || 0);
+  const minimum = Number(depositPromotion.minimum_amount || 0);
+  const percent = Number(depositPromotion.bonus_percent || 0);
+  const bonus = amount >= minimum ? Math.round(amount * percent * 10) / 1000 : 0;
+  box.style.display = 'block';
+  box.innerHTML = '<i class="fa-solid fa-gift"></i> Nạp từ <strong>' + minimum.toLocaleString('vi-VN') +
+    'đ</strong> được tặng <strong>' + percent.toLocaleString('vi-VN') + '%</strong> vào ví Checkpass.' +
+    (bonus > 0 ? '<br>Đơn này nhận thêm <strong>' + bonus.toLocaleString('vi-VN', { maximumFractionDigits: 1 }) + 'đ</strong>.' : '') +
+    '<br><small>Tiền thưởng không dùng để mua sản phẩm khác của shop.</small>';
 }
 
 function copyDepositText(elId) {
@@ -2182,8 +2211,8 @@ function copyDepositText(elId) {
 async function submitDepositCreate() {
   const input = document.getElementById('depositAmountInput');
   const amount = Number(input?.value || 0);
-  if (!amount || amount < 10000) {
-    toast('⚠️ Số tiền nạp tối thiểu là 10.000đ');
+  if (!Number.isSafeInteger(amount) || amount < depositMinimumAmount) {
+    toast('⚠️ Số tiền nạp tối thiểu là ' + depositMinimumAmount.toLocaleString('vi-VN') + 'đ');
     return;
   }
   const btn = document.getElementById('btnConfirmDeposit');
@@ -2205,6 +2234,9 @@ async function submitDepositCreate() {
     document.getElementById('depositAccNum').textContent = res.account_number;
     document.getElementById('depositAccName').textContent = res.account_name;
     document.getElementById('depositDisplayAmount').textContent = Number(res.amount).toLocaleString('vi-VN') + 'đ';
+    const bonus = Number(res.checkpass_bonus_amount || 0);
+    document.getElementById('depositBonusRow').style.display = bonus > 0 ? 'flex' : 'none';
+    document.getElementById('depositBonusAmount').textContent = '+' + bonus.toLocaleString('vi-VN', { maximumFractionDigits: 1 }) + 'đ';
     document.getElementById('depositRef').textContent = res.reference;
 
     document.getElementById('depositStepInput').style.display = 'none';
@@ -2231,8 +2263,10 @@ function startDepositPolling(reference) {
         // Thành công: chuyển sang Step 3
         document.getElementById('depositStepQR').style.display = 'none';
         document.getElementById('depositStepSuccess').style.display = 'block';
+        const bonus = Number(res.checkpass_bonus_amount || 0);
         document.getElementById('depositSuccessText').textContent =
-          'Đã cộng ' + Number(res.amount).toLocaleString('vi-VN') + 'đ vào tài khoản SP1S của bạn!';
+          'Đã cộng ' + Number(res.amount).toLocaleString('vi-VN') + 'đ vào tài khoản SP1S của bạn' +
+          (bonus > 0 ? ' và tặng thêm ' + bonus.toLocaleString('vi-VN', { maximumFractionDigits: 1 }) + 'đ vào ví Checkpass!' : '!');
         toast('🎉 Nạp tiền thành công!');
         // Refresh lại session và quote ngay lập tức
         await loadSession(false);
@@ -2470,7 +2504,9 @@ function updateOwnerBadge() {
     if (currentSession && currentSession.user) {
       const balance = Number(currentSession.available_balance ?? currentSession.balance ?? 0)
         .toLocaleString('vi-VN', { maximumFractionDigits: 1 });
-      txt.textContent = (currentSession.user.name || currentSession.user.email) + ' · ' + balance + 'đ khả dụng';
+      const bonus = Number(currentSession.available_checkpass_bonus_balance ?? currentSession.checkpass_bonus_balance ?? 0);
+      txt.textContent = (currentSession.user.name || currentSession.user.email) + ' · ' + balance + 'đ khả dụng' +
+        (bonus > 0 ? ' (KM ' + bonus.toLocaleString('vi-VN', { maximumFractionDigits: 1 }) + 'đ)' : '');
     } else if (TOKEN) txt.textContent = 'Quản trị viên';
     else txt.textContent = 'Chưa đăng nhập';
   }
