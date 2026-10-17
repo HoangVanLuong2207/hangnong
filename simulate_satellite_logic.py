@@ -213,19 +213,23 @@ def run_simulation(project: Path) -> None:
         1.0,
     )
     require(
-        not prepare["tcp"].get("credential_rejected"),
-        "LOGIN_PREPARE was incorrectly treated as credential failure",
+        prepare["tcp"].get("credential_rejected") is True,
+        "LOGIN_PREPARE rejection was not recorded",
     )
     prepare_row = batch_case(engine, lambda *_args: prepare)
-    require(prepare_row.get("status") == PENDING_STATUS, "LOGIN_PREPARE must stay pending")
+    require(prepare_row.get("status") == "FAIL", "Confirmed LOGIN_PREPARE must fail")
     require(
-        prepare_row.get("result_type") == PENDING_TYPE,
-        "LOGIN_PREPARE must return 'Chua the check'",
+        prepare_row.get("result_type") == LOGIN_FAIL_TYPE,
+        "Confirmed LOGIN_PREPARE must return 'Khong the log'",
     )
     prepare_public = engine.public_batch_row(prepare_row)
     require(
         prepare_public.get("last_tcp_rejection_stage") == "LOGIN_PREPARE",
         "LOGIN_PREPARE diagnostic stage was not preserved",
+    )
+    require(
+        prepare_public.get("login_rejection_confirmations") == "2",
+        "LOGIN_PREPARE rejection must be confirmed twice",
     )
 
     successful = {
@@ -349,7 +353,7 @@ def run_simulation(project: Path) -> None:
     require(slow_public.get("login_rejection_confirmations") == "2", "Missing confirmations")
 
     print(f"PASS: {project}")
-    print("  LOGIN_PREPARE rejection -> retry / Chua the check")
+    print("  Confirmed LOGIN_PREPARE -> FAIL / Khong the log")
     print("  LOGIN under 600 ms      -> require confirmation")
     print("  Changing LOGIN codes    -> Chua the check")
     print("  Retry succeeds          -> OK")
@@ -368,6 +372,8 @@ def discover_projects(script_path: Path) -> list[Path]:
             parent / "checkpass2",
             parent / "checkpass3",
             parent / "checkpass4",
+            parent / "checkpass5",
+            parent / "checkpass6",
         )
         if (candidate / "garena_api_test_chrome1.py").is_file()
     ]
@@ -383,7 +389,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--all",
         action="store_true",
-        help="Test checkpass and checkpass1 through checkpass4",
+        help="Test checkpass and checkpass1 through checkpass6",
     )
     parser.add_argument(
         "--accounts",

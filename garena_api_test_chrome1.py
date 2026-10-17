@@ -220,12 +220,13 @@ def resilient_tcp_client_type(tcp_module: Any) -> type:
 
 
 def tcp_login_was_rejected(error: Any) -> bool:
-    """Return whether Garena explicitly rejected password-bearing LOGIN 0x101."""
+    """Return whether Garena explicitly rejected the account login flow."""
 
     if bool(getattr(error, "garena_rejected", False)):
         command = getattr(error, "garena_command", 0)
-        # LOGIN_PREPARE 0x100 chưa gửi mật khẩu nên không thể kết luận credential.
-        return command == 0x101
+        # LOGIN_PREPARE does not verify the password, but a confirmed rejection
+        # still means the supplied account cannot proceed to login.
+        return command in (0x100, 0x101)
     message = str(error or "").strip().casefold()
     ascii_message = "".join(
         char
@@ -234,9 +235,10 @@ def tcp_login_was_rejected(error: Any) -> bool:
     )
     explicitly_rejected = "tu choi" in ascii_message or "rejected" in ascii_message
     if "garena" in ascii_message and explicitly_rejected:
-        if "login_prepare" in ascii_message or "0x100" in ascii_message:
-            return False
-        return "login" in ascii_message or "0x101" in ascii_message
+        return any(
+            marker in ascii_message
+            for marker in ("login_prepare", "0x100", "login", "0x101")
+        )
     return False
 
 
@@ -1893,8 +1895,9 @@ def batch_check_one(
             errors.append(attempt_error)
         if retry_stopped:
             errors.append("đã dừng trước lần kiểm tra lại")
-        # FAIL is reserved exclusively for an explicit TCP credential rejection.
-        # Network failures, timeouts and incomplete API data remain retryable.
+        # FAIL is reserved exclusively for a confirmed TCP rejection at
+        # LOGIN_PREPARE or LOGIN. Network failures, timeouts and incomplete API
+        # data remain retryable.
         tcp_ok = bool(tcp_info.get("ok"))
         row["status"] = "OK" if tcp_ok else "CHƯA THỂ CHECK"
         if rate_limit_suspected:
@@ -1907,9 +1910,12 @@ def batch_check_one(
                 flush=True,
             )
         elif login_rejected:
+            rejection_stage = row["last_tcp_rejection_stage"] or "TCP login"
+            rejection_code = row["last_tcp_rejection_result"] or "không rõ"
             errors.insert(
                 0,
-                "FALSE - LOGIN 0x101 bị từ chối cùng mã qua 2 lần kiểm tra",
+                f"FALSE - {rejection_stage} bị từ chối cùng mã {rejection_code} "
+                f"qua {BATCH_LOGIN_REJECTION_CONFIRMATIONS} lần kiểm tra",
             )
             row["status"] = "FAIL"
             row["result_type"] = "Không thể log"
@@ -2140,7 +2146,7 @@ tr.ok .badge{background:#1a7f37;color:#fff}tr.fail .badge{background:#da3633;col
 <div id="batchTiming" class="fileinfo">Thời gian: chưa bắt đầu.</div>
 <div class="wrap"><table><thead><tr><th>STT</th><th>Tài khoản</th><th>Trạng thái</th><th>UID Garena</th><th>Tên Kiện Tướng</th><th>Cấp</th><th>Ngày tạo</th><th>Trạng thái Kiện Tướng</th><th>ms</th></tr></thead>
 <tbody id="batchBody"></tbody></table></div>
-<small>Kết quả hiển thị trực tiếp khi từng tài khoản xong. LOGIN_PREPARE <code>0x100</code> chưa gửi mật khẩu nên luôn được retry và không bị kết luận <code>FAIL</code>. Chỉ LOGIN <code>0x101</code> bị từ chối cùng mã qua hai lần kiểm tra mới là <code>FAIL / Không thể log</code>. HTTP 429, rate limit/throttling, timeout, lỗi mạng/OAuth hoặc thiếu dữ liệu sẽ được retry tối đa 3 lần sau lần check đầu; nếu vẫn chưa rõ sau 4 lượt thì ghi <code>CHƯA THỂ CHECK</code>. XLSX có sáu tab, gồm <code>Không thể log</code> và <code>Chưa thể check</code>; cột Tài khoản trong mỗi tab có dạng <code>user|pass</code>. Bấm "Dừng" để kết thúc sớm.</small>
+<small>Kết quả hiển thị trực tiếp khi từng tài khoản xong. LOGIN_PREPARE <code>0x100</code> chưa kiểm tra mật khẩu, nhưng nếu Garena từ chối cùng bước và cùng mã qua hai lần thì tài khoản vẫn được kết luận <code>FAIL / Không thể log</code>; quy tắc xác nhận tương tự áp dụng cho LOGIN <code>0x101</code>. HTTP 429, rate limit/throttling, timeout, lỗi mạng/OAuth hoặc thiếu dữ liệu sẽ được retry tối đa 3 lần sau lần check đầu; nếu vẫn chưa rõ sau 4 lượt thì ghi <code>CHƯA THỂ CHECK</code>. XLSX có sáu tab, gồm <code>Không thể log</code> và <code>Chưa thể check</code>; cột Tài khoản trong mỗi tab có dạng <code>user|pass</code>. Bấm "Dừng" để kết thúc sớm.</small>
 
 <div id="splitSection" style="display:none;margin-top:18px">
 <h2 id="splitTitle" style="color:#58a6ff;margin:0 0 10px;font-size:16px"></h2>
@@ -2808,8 +2814,8 @@ def main() -> int:
         test_prepare_rejection.garena_result = 1
         if tcp_rate_limit_suspected(test_prepare_rejection, 100):
             raise SystemExit("SELF-TEST FAIL: LOGIN_PREPARE treated as rate limit")
-        if tcp_login_was_rejected(test_prepare_rejection):
-            raise SystemExit("SELF-TEST FAIL: LOGIN_PREPARE treated as credential failure")
+        if not tcp_login_was_rejected(test_prepare_rejection):
+            raise SystemExit("SELF-TEST FAIL: LOGIN_PREPARE rejection not recognized")
         if configured_server_ports([5555, 5556, 5555]) != [5555, 5556]:
             raise SystemExit("SELF-TEST FAIL: repeated HTTP ports")
         if configured_server_ports(None, ports_env="5555, 6000") != [5555, 6000]:

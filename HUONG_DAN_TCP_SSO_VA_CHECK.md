@@ -17,9 +17,9 @@ user|pass
   -> hủy dữ liệu phiên bí mật
 ```
 
-`LOGIN_PREPARE` nhận dữ liệu chuẩn bị (salt/verify code) để tạo payload login và chưa gửi dữ liệu mật khẩu. Nếu TCP từ chối tại bước này, hệ thống retry; hết 4 lượt vẫn không qua thì ghi `CHƯA THỂ CHECK`, không ghi `FAIL`.
+`LOGIN_PREPARE` nhận dữ liệu chuẩn bị (salt/verify code) để tạo payload login và chưa gửi dữ liệu mật khẩu. Nếu TCP từ chối tại bước này, hệ thống kiểm tra lại; cùng mã từ chối qua hai lần liên tiếp thì ghi `FAIL / Không thể log` vì tài khoản không thể đi tiếp tới bước mật khẩu.
 
-Khi server từ chối tại `LOGIN`, hệ thống kiểm tra lại. Chỉ khi cùng mã từ chối xuất hiện liên tiếp hai lần mới ghi `FAIL / Không thể log`. Nhãn này không tự nó khẳng định riêng nguyên nhân sai mật khẩu. Login thành công trả về UID và `session_key` TCP dài 16 byte.
+Khi server từ chối tại `LOGIN_PREPARE` hoặc `LOGIN`, hệ thống kiểm tra lại. Chỉ khi cùng bước và cùng mã từ chối xuất hiện liên tiếp hai lần mới ghi `FAIL / Không thể log`. `LOGIN_PREPARE` chưa kiểm tra mật khẩu nên nhãn này chỉ khẳng định tài khoản không thể tiếp tục đăng nhập; nó không tự khẳng định riêng nguyên nhân sai mật khẩu. Login thành công trả về UID và `session_key` TCP dài 16 byte.
 
 ## 2. SSO_KEY_GET
 
@@ -92,7 +92,7 @@ Khi xong hoặc có lỗi, xóa password khỏi object credential, đóng TCP cl
 ## 5. Kết quả và retry
 
 - `OK`: lấy được dữ liệu Kiện Tướng đủ để kết luận (level hoặc CTNV đã xác nhận).
-- `FAIL / Không thể log`: khi TCP `LOGIN` bị từ chối cùng mã qua hai lần liên tiếp; không khẳng định riêng nguyên nhân sai mật khẩu.
+- `FAIL / Không thể log`: khi TCP `LOGIN_PREPARE` hoặc `LOGIN` bị từ chối cùng bước và cùng mã qua hai lần liên tiếp; không khẳng định riêng nguyên nhân sai mật khẩu.
 - `CHƯA THỂ CHECK`: timeout, lỗi mạng, rate limit, CAPTCHA/OAuth hoặc dữ liệu chưa đủ. Không đánh đồng với sai mật khẩu.
 
 Một kết quả skin lỗi không được làm hỏng kết quả Kiện Tướng đã thành công. Ví dụ: `kientuong_status=OK`, `skin_status=CHƯA THỂ CHECK`.
