@@ -1848,6 +1848,7 @@ def _maintenance_window(now_timestamp: float | None = None) -> dict[str, Any]:
 
 _EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
 _LUCKY_DRAW_LOCK = threading.Lock()
+LUCKY_DAILY_WINNER_LIMIT = 2
 
 
 def _lucky_target_date(now_timestamp: float | None = None) -> tuple[str, float, str]:
@@ -1924,7 +1925,7 @@ def _get_active_lucky_winner(store: Any, email: str) -> dict[str, Any] | None:
 
 
 def execute_lucky_draw(store: Any, draw_date: str, force: bool = False) -> dict[str, Any]:
-    """Thực thi chọn ra tối đa 10 mail trúng thưởng cho draw_date vào lúc 0h."""
+    """Thực thi chọn ra tối đa 2 mail trúng thưởng cho draw_date vào lúc 0h."""
     with _LUCKY_DRAW_LOCK:
         existing_log = store.fetchone("SELECT id, winner_count FROM lucky_draw_logs WHERE draw_date=?", (draw_date,))
         if existing_log and not force:
@@ -1974,14 +1975,14 @@ def execute_lucky_draw(store: Any, draw_date: str, force: bool = False) -> dict[
         for iid in ineligible_ids:
             store.exec("UPDATE lucky_registrations SET status='ineligible_recent_win' WHERE id=?", (iid,))
 
-        # 4. Bốc thăm chọn tối đa 10 mail
+        # 4. Bốc thăm chọn tối đa 2 mail
         eligible_count = len(eligible_candidates)
         selected_winners: list[dict[str, Any]] = []
-        if eligible_count <= 10:
+        if eligible_count <= LUCKY_DAILY_WINNER_LIMIT:
             selected_winners = list(eligible_candidates)
         else:
             rng = secrets.SystemRandom()
-            selected_winners = rng.sample(eligible_candidates, 10)
+            selected_winners = rng.sample(eligible_candidates, LUCKY_DAILY_WINNER_LIMIT)
 
         # 5. Hiệu lực 1 ngày trọn vẹn (từ 00:00:00 đến 23:59:59.999 của draw_date)
         tz = _master_tzinfo()
