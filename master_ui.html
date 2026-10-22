@@ -1665,6 +1665,10 @@ table.data-table tbody tr:hover {
         <i class="fa-solid fa-bolt"></i> Nạp Tiền
       </button>
 
+      <a href="/luckytime" class="btn btn-sm" id="luckyTimeNavBtn" style="background:linear-gradient(135deg, #f59e0b, #ec4899);color:#ffffff;border:none;font-weight:700;box-shadow:0 2px 10px rgba(245,158,11,0.3)" title="Lucky Time 0H - Đăng ký nhận Free Slot Check mỗi ngày">
+        <i class="fa-solid fa-gift"></i> Lucky Time
+      </a>
+
       <button class="btn btn-primary btn-sm" id="createJobBtn" onclick="openSubmitModal()">
         <i class="fa-solid fa-plus"></i> Tạo Job Mới
       </button>
@@ -2560,8 +2564,10 @@ function updateOwnerBadge() {
       const balance = Number(currentSession.available_balance ?? currentSession.balance ?? 0)
         .toLocaleString('vi-VN', { maximumFractionDigits: 1 });
       const bonus = Number(currentSession.available_checkpass_bonus_balance ?? currentSession.checkpass_bonus_balance ?? 0);
+      const isLucky = currentSession.lucky_slot && currentSession.lucky_slot.active;
       txt.textContent = (currentSession.user.name || currentSession.user.email) + ' · ' + balance + 'đ khả dụng' +
-        (bonus > 0 ? ' (KM ' + bonus.toLocaleString('vi-VN', { maximumFractionDigits: 1 }) + 'đ)' : '');
+        (bonus > 0 ? ' (KM ' + bonus.toLocaleString('vi-VN', { maximumFractionDigits: 1 }) + 'đ)' : '') +
+        (isLucky ? ' · 🎁 Free Lucky Time' : '');
     } else if (TOKEN) txt.textContent = 'Quản trị viên';
     else txt.textContent = 'Chưa đăng nhập';
   }
@@ -2762,7 +2768,9 @@ async function refreshQuote() {
     const amount = Number(data.amount || 0).toLocaleString('vi-VN', { maximumFractionDigits: 1 });
     const available = Number(data.available_balance || currentSession?.available_balance || 0)
       .toLocaleString('vi-VN', { maximumFractionDigits: 1 });
-    let message = data.mode === 'admin' || isAdminKey
+    let message = data.lucky_active || data.mode === 'lucky'
+      ? '<strong style="color:#047857"><i class="fa-solid fa-gift"></i> Quyền Lucky Time 1 Ngày: Miễn phí hoàn toàn! Không trừ tiền.</strong>'
+      : data.mode === 'admin' || isAdminKey
       ? '<strong style="color:#047857"><i class="fa-solid fa-crown"></i> Quyền Quản trị viên: Miễn phí hoàn toàn, không giới hạn tài khoản.</strong>'
       : data.covered_by_time
       ? '<strong style="color:#047857">Đang có quyền ' + (mode === 'vvip' ? 'VVIP' : 'theo giờ') + ': không trừ thêm tiền.</strong>'
